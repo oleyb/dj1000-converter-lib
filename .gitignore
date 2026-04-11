@@ -1,0 +1,50 @@
+# macOS metadata
+.DS_Store
+.fseventsd/
+._*
+Thumbs.db
+
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editor / local tooling
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Native build artifacts
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+/tools/isv3_extract
+CMakeUserPresets.json
+compile_commands.json
+cmake-build-*/
+
+# Local reverse-engineering runtime and scratch output
+/tmp_debug/
+/photorun/
+/build/
+/dist/
+
+# Original vendor installer media and extracted binaries
+/PHOTO/
+/PHOTO.DS_
+/SETUP.EXE
+/SETUP.INF
+/TWAIN.DL_
+/TWAIN_32.DL_
+/TWUNK_16.EX_
+/TWUNK_32.EX_
+/extracted/
