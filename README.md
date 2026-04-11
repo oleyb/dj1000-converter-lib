@@ -69,6 +69,8 @@ The C++ surface exposes:
 - `dj1000::convert_dat_to_bgr(...)`
 - `dj1000::write_bmp(...)`
 
+`dj1000::Session` is intended for editor-style consumers. It keeps the parsed DAT open and caches slider-independent intermediate stages per image, so repeated renders with different edit settings do less work than one-shot conversion.
+
 The C surface exposes:
 
 - `dj1000_convert_options`

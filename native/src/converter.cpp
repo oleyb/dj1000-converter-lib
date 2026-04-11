@@ -1,8 +1,12 @@
 #include "dj1000/converter.hpp"
 
+#include "export_pipeline_cache.hpp"
 #include "dj1000/large_export_pipeline.hpp"
 #include "dj1000/normal_export_pipeline.hpp"
 
+#include <bit>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 
 namespace dj1000 {
@@ -63,12 +67,53 @@ void populate_debug_state(ConvertDebugState* target, const LargeExportDebugState
 
 }  // namespace
 
+enum class SessionPipelineKind {
+    Nonlarge,
+    Large,
+};
+
+struct SessionCacheKey {
+    SessionPipelineKind pipeline_kind = SessionPipelineKind::Nonlarge;
+    bool has_source_gain = false;
+    std::uint64_t source_gain_bits = 0;
+
+    [[nodiscard]] bool operator==(const SessionCacheKey& other) const noexcept = default;
+};
+
+struct SessionCacheEntry {
+    SessionCacheKey key;
+    std::shared_ptr<const CachedPostGeometryStage> stage;
+};
+
+struct SessionState {
+    explicit SessionState(DatFile dat_value)
+        : dat(std::move(dat_value)) {}
+
+    DatFile dat;
+    mutable std::mutex cache_mutex;
+    mutable std::vector<SessionCacheEntry> cache_entries;
+};
+
 namespace {
 
 void validate_plane_sizes(const RgbBytePlanes& planes) {
     if (planes.plane0.size() != planes.plane1.size() || planes.plane0.size() != planes.plane2.size()) {
         throw std::runtime_error("converted image planes must have the same size");
     }
+}
+
+[[nodiscard]] SessionPipelineKind pipeline_kind_for_size(ExportSize size) {
+    return size == ExportSize::Large ? SessionPipelineKind::Large : SessionPipelineKind::Nonlarge;
+}
+
+[[nodiscard]] SessionCacheKey build_session_cache_key(const ConvertOptions& options) {
+    SessionCacheKey key;
+    key.pipeline_kind = pipeline_kind_for_size(options.size);
+    key.has_source_gain = options.source_gain.has_value();
+    if (options.source_gain.has_value()) {
+        key.source_gain_bits = std::bit_cast<std::uint64_t>(*options.source_gain);
+    }
+    return key;
 }
 
 }  // namespace
@@ -164,23 +209,106 @@ ConvertedImage convert_dat_bytes_to_bgr(
     return convert_dat_to_bgr(make_dat_file(dat_bytes), options, debug_state);
 }
 
-Session::Session(DatFile dat)
-    : dat_(std::move(dat)) {}
+namespace {
+
+[[nodiscard]] std::shared_ptr<const CachedPostGeometryStage> find_cached_stage_locked(
+    const SessionState& state,
+    const SessionCacheKey& key
+) {
+    for (const auto& entry : state.cache_entries) {
+        if (entry.key == key) {
+            return entry.stage;
+        }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] std::shared_ptr<const CachedPostGeometryStage> build_cached_stage_for_options(
+    const SessionState& state,
+    const ConvertOptions& options
+) {
+    const auto source_gain_override = options.source_gain;
+    if (pipeline_kind_for_size(options.size) == SessionPipelineKind::Large) {
+        return std::make_shared<const CachedPostGeometryStage>(
+            build_cached_large_post_geometry_stage(state.dat, source_gain_override)
+        );
+    }
+    return std::make_shared<const CachedPostGeometryStage>(
+        build_cached_nonlarge_post_geometry_stage(state.dat, source_gain_override)
+    );
+}
+
+[[nodiscard]] std::shared_ptr<const CachedPostGeometryStage> get_or_build_cached_stage(
+    const SessionState& state,
+    const ConvertOptions& options
+) {
+    const auto key = build_session_cache_key(options);
+    {
+        std::lock_guard<std::mutex> lock(state.cache_mutex);
+        if (const auto cached = find_cached_stage_locked(state, key)) {
+            return cached;
+        }
+    }
+
+    auto built = build_cached_stage_for_options(state, options);
+    std::lock_guard<std::mutex> lock(state.cache_mutex);
+    if (const auto cached = find_cached_stage_locked(state, key)) {
+        return cached;
+    }
+    state.cache_entries.push_back({key, built});
+    return built;
+}
+
+}  // namespace
 
 Session Session::open(std::span<const std::uint8_t> dat_bytes) {
-    return Session(make_dat_file(dat_bytes));
+    return Session(std::make_shared<SessionState>(make_dat_file(dat_bytes)));
 }
 
 Session Session::open(const DatFile& dat) {
-    return Session(dat);
+    return Session(std::make_shared<SessionState>(dat));
 }
 
+Session::Session(std::shared_ptr<SessionState> state)
+    : state_(std::move(state)) {}
+
 const DatFile& Session::dat_file() const noexcept {
-    return dat_;
+    return state_->dat;
 }
 
 ConvertedImage Session::render(const ConvertOptions& options, ConvertDebugState* debug_state) const {
-    return convert_dat_to_bgr(dat_, options, debug_state);
+    const auto cached_stage = get_or_build_cached_stage(*state_, options);
+
+    if (options.size == ExportSize::Large) {
+        LargeExportDebugState large_debug;
+        const auto overrides = build_large_overrides(options);
+        auto image = render_default_large_export_from_cached_stage(
+            *cached_stage,
+            debug_state != nullptr ? &large_debug : nullptr,
+            &overrides
+        );
+        populate_debug_state(debug_state, large_debug);
+        return {
+            .width = 504,
+            .height = 378,
+            .planes = std::move(image),
+        };
+    }
+
+    NormalExportDebugState normal_debug;
+    const auto overrides = build_normal_overrides(options);
+    auto image = render_default_nonlarge_export_from_cached_stage(
+        *cached_stage,
+        options.size == ExportSize::Small,
+        debug_state != nullptr ? &normal_debug : nullptr,
+        &overrides
+    );
+    populate_debug_state(debug_state, normal_debug);
+    return {
+        .width = 320,
+        .height = 240,
+        .planes = std::move(image),
+    };
 }
 
 }  // namespace dj1000

@@ -1,5 +1,6 @@
 #include "dj1000/normal_export_pipeline.hpp"
 
+#include "export_pipeline_cache.hpp"
 #include "dj1000/bmp.hpp"
 #include "dj1000/nonlarge_post_geometry_pipeline.hpp"
 #include "dj1000/post_geometry_center_scale.hpp"
@@ -115,6 +116,52 @@ DefaultSettingsBlock build_default_settings_block(
         static_cast<int>(dat.metadata.trailer[11]) +
         (10 * static_cast<int>(dat.metadata.trailer[10]));
     settings.values[11] = 1;
+
+    validate_balance_value(settings.values[0], "green_balance");
+    validate_balance_value(settings.values[1], "red_balance");
+    validate_balance_value(settings.values[2], "blue_balance");
+    validate_level_value(settings.values[3], "contrast");
+    validate_level_value(settings.values[4], "brightness");
+    validate_level_value(settings.values[5], "vividness");
+    validate_level_value(settings.values[6], "sharpness");
+
+    return settings;
+}
+
+DefaultSettingsBlock build_runtime_settings_block(
+    int export_mode,
+    const NormalExportOverrides* overrides
+) {
+    DefaultSettingsBlock settings;
+    settings.values[0] = get_override_or_default(
+        overrides != nullptr ? overrides->green_balance : std::nullopt,
+        kNormalColorBalanceDefault
+    );
+    settings.values[1] = get_override_or_default(
+        overrides != nullptr ? overrides->red_balance : std::nullopt,
+        kNormalColorBalanceDefault
+    );
+    settings.values[2] = get_override_or_default(
+        overrides != nullptr ? overrides->blue_balance : std::nullopt,
+        kNormalColorBalanceDefault
+    );
+    settings.values[3] = get_override_or_default(
+        overrides != nullptr ? overrides->contrast : std::nullopt,
+        kNormalContrastDefault
+    );
+    settings.values[4] = get_override_or_default(
+        overrides != nullptr ? overrides->brightness : std::nullopt,
+        kNormalBrightnessDefault
+    );
+    settings.values[5] = get_override_or_default(
+        overrides != nullptr ? overrides->vividness : std::nullopt,
+        kNormalVividnessDefault
+    );
+    settings.values[6] = get_override_or_default(
+        overrides != nullptr ? overrides->sharpness : std::nullopt,
+        kNormalSharpnessDefault
+    );
+    settings.values[7] = export_mode;
 
     validate_balance_value(settings.values[0], "green_balance");
     validate_balance_value(settings.values[1], "red_balance");
@@ -246,28 +293,51 @@ std::vector<std::uint8_t> interleave_planes_bgr(
     return output;
 }
 
-RgbBytePlanes build_default_nonlarge_export_bgr_planes(
+}  // namespace
+
+CachedPostGeometryStage build_cached_nonlarge_post_geometry_stage(
     const DatFile& dat,
-    int export_mode,
-    NormalExportDebugState* debug_state,
-    const NormalExportOverrides* overrides
+    std::optional<double> source_gain_override
 ) {
-    const auto settings = build_default_settings_block(dat, export_mode, overrides);
+    const auto settings = build_default_settings_block(dat, kNormalExportMode, nullptr);
     if (settings.values[10] == 0 && settings.values[11] == 1) {
         throw std::runtime_error("the native normal export path does not yet implement the 0x4570 pre-pass");
     }
 
     auto source = extract_normal_source_payload(dat);
     double source_gain = compute_source_gain(source, kSourceGainTarget);
-    if (overrides != nullptr && overrides->source_gain.has_value()) {
-        source_gain = *overrides->source_gain;
+    if (source_gain_override.has_value()) {
+        source_gain = *source_gain_override;
     }
     apply_source_gain(source, source_gain);
 
+    auto prepared = build_nonlarge_post_geometry_planes_from_source(source, false);
+    apply_post_geometry_stage_4810(
+        prepared.delta0,
+        prepared.center,
+        prepared.delta2,
+        kNormalOutputWidth,
+        kNormalWorkingHeight
+    );
+    return {
+        .source_gain = source_gain,
+        .prepared = std::move(prepared),
+    };
+}
+
+RgbBytePlanes render_default_nonlarge_export_from_cached_stage(
+    const CachedPostGeometryStage& cached_stage,
+    bool small_export,
+    NormalExportDebugState* debug_state,
+    const NormalExportOverrides* overrides
+) {
+    const int export_mode = small_export ? kSmallExportMode : kNormalExportMode;
+    const auto settings = build_runtime_settings_block(export_mode, overrides);
+    const double source_gain = cached_stage.source_gain;
     const double sharpness_scalar = std::clamp(source_gain, 1.0, 1.5);
     const double post_rgb_scalar = compute_stage_3060_scalar(source_gain);
     double stage3060_scalar = compute_stage_3060_scalar(source_gain);
-    const auto& sharpness_param0_table = export_mode == kSmallExportMode
+    const auto& sharpness_param0_table = small_export
         ? kSmallSharpnessStage3060Param0
         : kNormalSharpnessStage3060Param0;
     int stage3060_param0 = sharpness_param0_table[settings.values[6]];
@@ -293,14 +363,7 @@ RgbBytePlanes build_default_nonlarge_export_bgr_planes(
         }
     }
 
-    auto prepared = build_nonlarge_post_geometry_planes_from_source(source, false);
-    apply_post_geometry_stage_4810(
-        prepared.delta0,
-        prepared.center,
-        prepared.delta2,
-        kNormalOutputWidth,
-        kNormalWorkingHeight
-    );
+    auto prepared = cached_stage.prepared;
     if (settings.values[6] != 0) {
         apply_post_geometry_stage_3600(prepared.center, kNormalOutputWidth, kNormalWorkingHeight);
     }
@@ -410,16 +473,18 @@ RgbBytePlanes build_default_nonlarge_export_bgr_planes(
     return output;
 }
 
-}  // namespace
-
 RgbBytePlanes build_default_normal_export_bgr_planes(
     const DatFile& dat,
     NormalExportDebugState* debug_state,
     const NormalExportOverrides* overrides
 ) {
-    return build_default_nonlarge_export_bgr_planes(
+    const auto cached_stage = build_cached_nonlarge_post_geometry_stage(
         dat,
-        kNormalExportMode,
+        overrides != nullptr ? overrides->source_gain : std::nullopt
+    );
+    return render_default_nonlarge_export_from_cached_stage(
+        cached_stage,
+        false,
         debug_state,
         overrides
     );
@@ -430,9 +495,13 @@ RgbBytePlanes build_default_small_export_bgr_planes(
     NormalExportDebugState* debug_state,
     const NormalExportOverrides* overrides
 ) {
-    return build_default_nonlarge_export_bgr_planes(
+    const auto cached_stage = build_cached_nonlarge_post_geometry_stage(
         dat,
-        kSmallExportMode,
+        overrides != nullptr ? overrides->source_gain : std::nullopt
+    );
+    return render_default_nonlarge_export_from_cached_stage(
+        cached_stage,
+        true,
         debug_state,
         overrides
     );

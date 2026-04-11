@@ -5,11 +5,14 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
 
 namespace dj1000 {
+
+struct SessionState;
 
 enum class ExportSize {
     Small,
@@ -65,9 +68,9 @@ public:
     ) const;
 
 private:
-    explicit Session(DatFile dat);
+    explicit Session(std::shared_ptr<SessionState> state);
 
-    DatFile dat_;
+    std::shared_ptr<SessionState> state_;
 };
 
 [[nodiscard]] ConvertedImage convert_dat_bytes_to_bgr(

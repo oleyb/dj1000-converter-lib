@@ -37,7 +37,8 @@ Then open:
 - loading the built WASM module from a separate consumer directory
 - reading a local `.DAT` file in the browser
 - opening a per-image WASM session from uploaded DAT bytes
-- calling `session.renderToRgba(...)`
+- calling `session.renderToRgba(...)` inside a module worker
+- live slider updates while conversion runs off the main UI thread
 - drawing the returned RGBA pixels into a `<canvas>`
 
 For the lower-level build and API details, see [WebAssembly Build](../../docs/wasm.md).

@@ -33,8 +33,27 @@ int main() {
     assert(session.dat_file().bytes.size() == dj1000::kExpectedDatSize);
     assert(session.dat_file().metadata.signature_matches);
 
+    dj1000::ConvertOptions normal_options;
+    normal_options.size = dj1000::ExportSize::Normal;
+    normal_options.sliders.vividness = 5;
+    const auto direct_normal = dj1000::convert_dat_bytes_to_bgr(bytes, normal_options);
+    const auto session_normal = session.render(normal_options);
+    assert(direct_normal.width == 320);
+    assert(direct_normal.height == 240);
+    assert(direct_normal.interleaved_rgb() == session_normal.interleaved_rgb());
+
+    dj1000::ConvertOptions small_options;
+    small_options.size = dj1000::ExportSize::Small;
+    small_options.sliders.brightness = 6;
+    const auto direct_small = dj1000::convert_dat_bytes_to_bgr(bytes, small_options);
+    const auto session_small = session.render(small_options);
+    assert(direct_small.width == 320);
+    assert(direct_small.height == 240);
+    assert(direct_small.interleaved_rgb() == session_small.interleaved_rgb());
+
     dj1000::ConvertOptions large_options;
     large_options.size = dj1000::ExportSize::Large;
+    large_options.source_gain = 1.25;
     large_options.sliders.brightness = 6;
     const auto direct_large = dj1000::convert_dat_bytes_to_bgr(bytes, large_options);
     const auto session_large = session.render(large_options);
@@ -42,14 +61,11 @@ int main() {
     assert(direct_large.height == session_large.height);
     assert(direct_large.interleaved_rgba() == session_large.interleaved_rgba());
 
-    dj1000::ConvertOptions small_options;
-    small_options.size = dj1000::ExportSize::Small;
-    small_options.sliders.vividness = 5;
-    const auto direct_small = dj1000::convert_dat_bytes_to_bgr(bytes, small_options);
-    const auto session_small = session.render(small_options);
-    assert(direct_small.width == 320);
-    assert(direct_small.height == 240);
-    assert(direct_small.interleaved_rgb() == session_small.interleaved_rgb());
+    dj1000::ConvertOptions second_large_options = large_options;
+    second_large_options.sliders.vividness = 6;
+    const auto second_direct_large = dj1000::convert_dat_bytes_to_bgr(bytes, second_large_options);
+    const auto second_session_large = session.render(second_large_options);
+    assert(second_direct_large.interleaved_rgba() == second_session_large.interleaved_rgba());
 
     std::cout << "test_session passed\n";
     return 0;

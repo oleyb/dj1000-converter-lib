@@ -15,17 +15,18 @@ const sliderDefinitions = [
 ];
 
 const sliderElements = Object.fromEntries(
-  sliderDefinitions.map((definition) => [definition.id, document.querySelector(`#${definition.id}`)])
+  sliderDefinitions.map((definition) => [definition.id, document.querySelector(`#${definition.id}`)]),
 );
 const sliderValueElements = Object.fromEntries(
-  sliderDefinitions.map((definition) => [definition.id, document.querySelector(`#${definition.valueId}`)])
+  sliderDefinitions.map((definition) => [definition.id, document.querySelector(`#${definition.valueId}`)]),
 );
 
-let converterPromise = null;
+let renderWorker = null;
 let loadedFile = null;
-let loadedSession = null;
-let renderTimer = null;
-let renderGeneration = 0;
+let sessionReady = false;
+let activeFileToken = 0;
+let latestRenderRequestId = 0;
+let pendingOpen = null;
 
 function setStatus(message) {
   statusNode.textContent = message;
@@ -73,18 +74,98 @@ function updateSliderReadouts() {
   }
 }
 
-async function loadConverter() {
-  if (converterPromise !== null) {
-    return converterPromise;
+function ensureWorker() {
+  if (renderWorker !== null) {
+    return renderWorker;
   }
 
-  converterPromise = import("../../build-wasm/native/dj1000_wasm_api.mjs")
-    .then(({ createDj1000WasmConverter }) => createDj1000WasmConverter())
-    .catch((error) => {
-      converterPromise = null;
-      throw error;
-    });
-  return converterPromise;
+  renderWorker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" });
+  renderWorker.addEventListener("message", handleWorkerMessage);
+  renderWorker.addEventListener("error", handleWorkerFailure);
+  return renderWorker;
+}
+
+function handleWorkerFailure(event) {
+  console.error(event);
+  setStatus(
+    [
+      "Worker initialization failed.",
+      String(event.message ?? event.error ?? event),
+      "",
+      "Make sure you built the WASM target and are serving the repo root over HTTP.",
+    ].join("\n"),
+  );
+}
+
+function settlePendingOpen(fileToken, error = null) {
+  if (pendingOpen === null || pendingOpen.fileToken !== fileToken) {
+    return;
+  }
+
+  const { resolve, reject } = pendingOpen;
+  pendingOpen = null;
+  if (error === null) {
+    resolve();
+    return;
+  }
+  reject(error);
+}
+
+function handleWorkerMessage(event) {
+  const message = event.data ?? {};
+
+  switch (message.type) {
+    case "session-opened":
+      if (message.fileToken !== activeFileToken) {
+        return;
+      }
+      sessionReady = true;
+      settlePendingOpen(message.fileToken);
+      return;
+    case "session-open-error":
+      if (message.fileToken !== activeFileToken) {
+        return;
+      }
+      sessionReady = false;
+      settlePendingOpen(message.fileToken, new Error(message.error ?? "session open failed"));
+      setStatus(
+        [
+          "Conversion failed.",
+          String(message.error ?? "session open failed"),
+          "",
+          "Make sure you built the WASM target and are serving the repo root over HTTP.",
+        ].join("\n"),
+      );
+      return;
+    case "render-complete":
+      if (message.fileToken !== activeFileToken || message.requestId !== latestRenderRequestId) {
+        return;
+      }
+      drawResult({
+        width: message.width,
+        height: message.height,
+        pixels: new Uint8Array(message.pixels),
+      });
+      metaNode.textContent =
+        `${loadedFile?.name ?? "unknown"} · ${message.width}x${message.height} · ${message.pixels.byteLength} RGBA bytes · ${currentOptionSummary()}`;
+      setStatus("Conversion complete.");
+      return;
+    case "render-error":
+      if (message.fileToken !== activeFileToken || message.requestId !== latestRenderRequestId) {
+        return;
+      }
+      setStatus(
+        [
+          "Conversion failed.",
+          String(message.error ?? "render failed"),
+          "",
+          "Make sure you built the WASM target and are serving the repo root over HTTP.",
+        ].join("\n"),
+      );
+      return;
+    default:
+      return;
+  }
 }
 
 function drawResult(result) {
@@ -96,70 +177,72 @@ function drawResult(result) {
   context.putImageData(imageData, 0, 0);
 }
 
-function clearScheduledRender() {
-  if (renderTimer !== null) {
-    window.clearTimeout(renderTimer);
-    renderTimer = null;
+async function openSessionForFile(file, bytes) {
+  const fileToken = activeFileToken;
+  if (pendingOpen !== null) {
+    settlePendingOpen(pendingOpen.fileToken, new Error("superseded by a newer file selection"));
   }
+
+  const worker = ensureWorker();
+  await new Promise((resolve, reject) => {
+    pendingOpen = { fileToken, resolve, reject };
+    worker.postMessage(
+      {
+        type: "open-file",
+        fileToken,
+        fileName: file.name,
+        buffer: bytes.buffer,
+      },
+      [bytes.buffer],
+    );
+  });
 }
 
-function scheduleRender(reason = "Updating preview...") {
-  if (loadedSession === null) {
+function requestRender(reason = "Updating preview...") {
+  if (loadedFile === null || !sessionReady) {
     return;
   }
-  clearScheduledRender();
-  renderTimer = window.setTimeout(() => {
-    renderTimer = null;
-    void convertSelectedFile(reason);
-  }, 140);
+
+  latestRenderRequestId += 1;
+  setStatus(reason);
+  ensureWorker().postMessage({
+    type: "render",
+    fileToken: activeFileToken,
+    requestId: latestRenderRequestId,
+    options: currentOptions(),
+  });
 }
 
 async function loadSelectedFile() {
   const file = fileInput.files?.[0] ?? null;
   loadedFile = file;
-  if (loadedSession !== null) {
-    loadedSession.close();
-    loadedSession = null;
-  }
+  activeFileToken += 1;
+  sessionReady = false;
 
   if (file === null) {
+    if (pendingOpen !== null) {
+      settlePendingOpen(pendingOpen.fileToken, new Error("session closed"));
+    }
+    ensureWorker().postMessage({ type: "close-session", fileToken: activeFileToken });
     metaNode.textContent = "No image loaded yet.";
     setStatus("Choose a DAT file to begin.");
     return;
   }
 
-  setStatus(`Reading ${file.name}...`);
-  const converter = await loadConverter();
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  setStatus(`Opening session for ${file.name}...`);
-  loadedSession = converter.openSession(bytes);
-  await convertSelectedFile("Converting uploaded DAT...");
-}
-
-async function convertSelectedFile(reason = "Converting...") {
-  if (loadedFile === null || loadedSession === null) {
-    setStatus("Choose a DAT file first.");
-    return;
-  }
-
-  const renderId = ++renderGeneration;
-  setStatus("Loading WASM module...");
-
   try {
-    const converter = await loadConverter();
-    if (renderId !== renderGeneration) {
+    setStatus(`Reading ${file.name}...`);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (file !== loadedFile) {
       return;
     }
-    setStatus(reason);
-    const result = loadedSession.renderToRgba(currentOptions());
-    if (renderId !== renderGeneration) {
-      return;
-    }
-    drawResult(result);
-    metaNode.textContent =
-      `${loadedFile.name} · ${result.width}x${result.height} · ${result.pixels.length} RGBA bytes · ${currentOptionSummary()}`;
-    setStatus("Conversion complete.");
+
+    setStatus(`Opening worker session for ${file.name}...`);
+    await openSessionForFile(file, bytes);
+    requestRender("Converting uploaded DAT in a background worker...");
   } catch (error) {
+    if (file !== loadedFile) {
+      return;
+    }
     console.error(error);
     setStatus(
       [
@@ -167,7 +250,7 @@ async function convertSelectedFile(reason = "Converting...") {
         String(error?.message ?? error),
         "",
         "Make sure you built the WASM target and are serving the repo root over HTTP.",
-      ].join("\n")
+      ].join("\n"),
     );
   }
 }
@@ -177,15 +260,13 @@ fileInput.addEventListener("change", () => {
 });
 
 sizeSelect.addEventListener("change", () => {
-  scheduleRender(`Updating ${sizeSelect.value} preview...`);
+  requestRender(`Updating ${sizeSelect.value} preview in a background worker...`);
 });
 
 for (const definition of sliderDefinitions) {
   sliderElements[definition.id].addEventListener("input", () => {
     updateSliderReadouts();
-  });
-  sliderElements[definition.id].addEventListener("change", () => {
-    scheduleRender(`Applying ${definition.id.replaceAll("-", " ")}...`);
+    requestRender(`Applying ${definition.id.replaceAll("-", " ")} in a background worker...`);
   });
 }
 

@@ -78,6 +78,7 @@ Current direction:
 - keep a small high-level C++ API
 - keep a stable C API for broader embedding and WASM/language bindings
 - support both direct one-shot conversion and per-image session workflows
+- let per-image sessions cache slider-independent pipeline work so editor-style apps can rerender efficiently
 - keep the WASM target as a thin build/binding layer over the same native library
 
 The public API should not expose individual reverse-engineered stage helpers unless there is a strong reason.

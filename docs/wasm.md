@@ -47,7 +47,9 @@ It demonstrates:
 
 - loading the built WASM helper from outside the core library folder
 - reading a local `.DAT` file in the browser
-- converting it to RGBA
+- opening a per-image session in a browser worker
+- converting it to RGBA off the main thread
+- updating the preview live while sliders move
 - drawing the result into a `<canvas>`
 
 Run it by:
@@ -93,6 +95,8 @@ The helper supports both styles:
 
 - `convertDatToRgba(datBytes, options)` for direct one-shot conversion
 - `openSession(datBytes)` plus `session.renderToRgba(options)` for GUI-style repeated editing
+
+The session form is the better fit for editors and library views. It reuses the core library's per-image cache of slider-independent stages, so changing brightness, vividness, or color balance can rerender from a cheaper starting point than reopening the DAT every time.
 
 ## Option Mapping
 
