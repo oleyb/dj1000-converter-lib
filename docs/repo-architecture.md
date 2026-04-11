@@ -71,11 +71,14 @@ Recommended mental model:
 Current downstream entry point:
 
 - [`native/include/dj1000/converter.hpp`](../native/include/dj1000/converter.hpp)
+- [`native/include/dj1000/c_api.h`](../native/include/dj1000/c_api.h)
 
-Future direction:
+Current direction:
 
 - keep a small high-level C++ API
-- later add a stable C API for broader embedding and WASM/language bindings
+- keep a stable C API for broader embedding and WASM/language bindings
+- support both direct one-shot conversion and per-image session workflows
+- keep the WASM target as a thin build/binding layer over the same native library
 
 The public API should not expose individual reverse-engineered stage helpers unless there is a strong reason.
 

@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from path_helpers import native_binary_default, runtime_tmp_dir, scratch_dir
-
 
 def project_root() -> Path:
     return Path(__file__).resolve().parents[1]

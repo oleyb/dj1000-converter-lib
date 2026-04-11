@@ -12,6 +12,7 @@ Recommended:
 
 - Ninja
 - Git
+- Emscripten for the optional WASM target
 - Wine for legacy DLL verification
 
 ## macOS Setup
@@ -22,6 +23,12 @@ Example with Homebrew:
 brew install cmake ninja python
 ```
 
+Optional WASM toolchain on macOS with Homebrew:
+
+```bash
+brew install emscripten
+```
+
 ## Configure And Build
 
 From the repo root:
@@ -30,6 +37,28 @@ From the repo root:
 cmake -S . -B build -G Ninja
 cmake --build build
 ```
+
+## Configure And Build The WASM Target
+
+The WASM target is optional and lives in the same repo so it shares the exact converter core.
+
+Example with Emscripten:
+
+```bash
+emcmake cmake -S . -B build-wasm -G Ninja \
+  -DDJ1000_BUILD_WASM=ON \
+  -DDJ1000_BUILD_CLI=OFF \
+  -DDJ1000_BUILD_TESTS=OFF
+cmake --build build-wasm --target dj1000_wasm
+```
+
+That produces:
+
+- `build-wasm/native/dj1000_wasm.mjs`
+- `build-wasm/native/dj1000_wasm.wasm`
+- `build-wasm/native/dj1000_wasm_api.mjs`
+
+The helper module wraps the low-level export and gives downstream browser/Node code a `convertDatToRgba(...)` entrypoint. See [WebAssembly Build](wasm.md) for usage details.
 
 ## Run Tests
 
@@ -58,6 +87,7 @@ target_link_libraries(my_app PRIVATE dj1000::dj1000)
 
 - [`native/include`](../native/include): public headers
 - [`native/src`](../native/src): converter implementation
+- [`native/wasm`](../native/wasm): WASM-facing JS helper layer
 - [`native/tests`](../native/tests): fast native tests
 - [`tools`](../tools): verification and tracing tools
 - [`docs`](.): reverse-engineering and contributor docs

@@ -28,6 +28,10 @@ struct DatFile {
     [[nodiscard]] std::span<const std::uint8_t> raw_payload() const;
 };
 
+[[nodiscard]] DatFile make_dat_file(
+    std::span<const std::uint8_t> bytes,
+    std::filesystem::path path = {}
+);
 [[nodiscard]] DatFile load_dat_file(const std::filesystem::path& path);
 [[nodiscard]] DatMetadata parse_dat_metadata(std::span<const std::uint8_t> bytes);
 [[nodiscard]] std::string format_hex(std::span<const std::uint8_t> bytes);

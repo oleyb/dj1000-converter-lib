@@ -1,6 +1,5 @@
 #include "dj1000/converter.hpp"
 
-#include "dj1000/bmp.hpp"
 #include "dj1000/large_export_pipeline.hpp"
 #include "dj1000/normal_export_pipeline.hpp"
 
@@ -64,10 +63,18 @@ void populate_debug_state(ConvertDebugState* target, const LargeExportDebugState
 
 }  // namespace
 
-std::vector<std::uint8_t> ConvertedImage::interleaved_bgr() const {
+namespace {
+
+void validate_plane_sizes(const RgbBytePlanes& planes) {
     if (planes.plane0.size() != planes.plane1.size() || planes.plane0.size() != planes.plane2.size()) {
         throw std::runtime_error("converted image planes must have the same size");
     }
+}
+
+}  // namespace
+
+std::vector<std::uint8_t> ConvertedImage::interleaved_bgr() const {
+    validate_plane_sizes(planes);
 
     std::vector<std::uint8_t> output;
     output.reserve(planes.plane0.size() * 3);
@@ -75,6 +82,33 @@ std::vector<std::uint8_t> ConvertedImage::interleaved_bgr() const {
         output.push_back(planes.plane0[index]);
         output.push_back(planes.plane1[index]);
         output.push_back(planes.plane2[index]);
+    }
+    return output;
+}
+
+std::vector<std::uint8_t> ConvertedImage::interleaved_rgb() const {
+    validate_plane_sizes(planes);
+
+    std::vector<std::uint8_t> output;
+    output.reserve(planes.plane0.size() * 3);
+    for (std::size_t index = 0; index < planes.plane0.size(); ++index) {
+        output.push_back(planes.plane0[index]);
+        output.push_back(planes.plane1[index]);
+        output.push_back(planes.plane2[index]);
+    }
+    return output;
+}
+
+std::vector<std::uint8_t> ConvertedImage::interleaved_rgba() const {
+    validate_plane_sizes(planes);
+
+    std::vector<std::uint8_t> output;
+    output.reserve(planes.plane0.size() * 4);
+    for (std::size_t index = 0; index < planes.plane0.size(); ++index) {
+        output.push_back(planes.plane0[index]);
+        output.push_back(planes.plane1[index]);
+        output.push_back(planes.plane2[index]);
+        output.push_back(0xFF);
     }
     return output;
 }
@@ -122,15 +156,31 @@ ConvertedImage convert_dat_to_bgr(
     };
 }
 
-void write_bmp(
-    const DatFile& dat,
-    const std::filesystem::path& output_path,
+ConvertedImage convert_dat_bytes_to_bgr(
+    std::span<const std::uint8_t> dat_bytes,
     const ConvertOptions& options,
     ConvertDebugState* debug_state
 ) {
-    const auto image = convert_dat_to_bgr(dat, options, debug_state);
-    const auto pixels = image.interleaved_bgr();
-    write_bmp24_bgr(output_path, image.width, image.height, pixels);
+    return convert_dat_to_bgr(make_dat_file(dat_bytes), options, debug_state);
+}
+
+Session::Session(DatFile dat)
+    : dat_(std::move(dat)) {}
+
+Session Session::open(std::span<const std::uint8_t> dat_bytes) {
+    return Session(make_dat_file(dat_bytes));
+}
+
+Session Session::open(const DatFile& dat) {
+    return Session(dat);
+}
+
+const DatFile& Session::dat_file() const noexcept {
+    return dat_;
+}
+
+ConvertedImage Session::render(const ConvertOptions& options, ConvertDebugState* debug_state) const {
+    return convert_dat_to_bgr(dat_, options, debug_state);
 }
 
 }  // namespace dj1000

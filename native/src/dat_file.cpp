@@ -1,5 +1,6 @@
 #include "dj1000/dat_file.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -32,23 +33,10 @@ DatMetadata parse_dat_metadata(std::span<const std::uint8_t> bytes) {
     return metadata;
 }
 
-DatFile load_dat_file(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        throw std::runtime_error("Could not open DAT file: " + path.string());
-    }
-
-    std::vector<std::uint8_t> bytes(
-        (std::istreambuf_iterator<char>(input)),
-        std::istreambuf_iterator<char>()
-    );
-    if (bytes.size() != kExpectedDatSize) {
-        throw std::runtime_error("Unexpected DAT size for " + path.string());
-    }
-
+DatFile make_dat_file(std::span<const std::uint8_t> bytes, std::filesystem::path path) {
     DatFile dat;
-    dat.path = path;
-    dat.bytes = std::move(bytes);
+    dat.path = std::move(path);
+    dat.bytes.assign(bytes.begin(), bytes.end());
     dat.metadata = parse_dat_metadata(dat.bytes);
     return dat;
 }

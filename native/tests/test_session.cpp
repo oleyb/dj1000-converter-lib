@@ -1,0 +1,56 @@
+#include "dj1000/converter.hpp"
+
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <iostream>
+#include <vector>
+
+namespace {
+
+std::vector<std::uint8_t> make_sample_dat() {
+    std::vector<std::uint8_t> bytes(dj1000::kExpectedDatSize);
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        bytes[index] = static_cast<std::uint8_t>((index * 17U) & 0xFFU);
+    }
+
+    bytes[dj1000::kRawBlockSize + 0] = 0xC4;
+    bytes[dj1000::kRawBlockSize + 1] = 0xB2;
+    bytes[dj1000::kRawBlockSize + 2] = 0xE3;
+    bytes[dj1000::kRawBlockSize + 3] = 0x22;
+    bytes[dj1000::kRawBlockSize + 8] = 0;
+    bytes[dj1000::kRawBlockSize + 10] = 0;
+    bytes[dj1000::kRawBlockSize + 11] = 1;
+    return bytes;
+}
+
+}  // namespace
+
+int main() {
+    const auto bytes = make_sample_dat();
+    const auto session = dj1000::Session::open(bytes);
+
+    assert(session.dat_file().bytes.size() == dj1000::kExpectedDatSize);
+    assert(session.dat_file().metadata.signature_matches);
+
+    dj1000::ConvertOptions large_options;
+    large_options.size = dj1000::ExportSize::Large;
+    large_options.sliders.brightness = 6;
+    const auto direct_large = dj1000::convert_dat_bytes_to_bgr(bytes, large_options);
+    const auto session_large = session.render(large_options);
+    assert(direct_large.width == session_large.width);
+    assert(direct_large.height == session_large.height);
+    assert(direct_large.interleaved_rgba() == session_large.interleaved_rgba());
+
+    dj1000::ConvertOptions small_options;
+    small_options.size = dj1000::ExportSize::Small;
+    small_options.sliders.vividness = 5;
+    const auto direct_small = dj1000::convert_dat_bytes_to_bgr(bytes, small_options);
+    const auto session_small = session.render(small_options);
+    assert(direct_small.width == 320);
+    assert(direct_small.height == 240);
+    assert(direct_small.interleaved_rgb() == session_small.interleaved_rgb());
+
+    std::cout << "test_session passed\n";
+    return 0;
+}

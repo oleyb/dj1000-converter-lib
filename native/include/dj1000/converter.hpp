@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace dj1000 {
@@ -48,8 +49,32 @@ struct ConvertedImage {
     RgbBytePlanes planes;
 
     [[nodiscard]] std::vector<std::uint8_t> interleaved_bgr() const;
+    [[nodiscard]] std::vector<std::uint8_t> interleaved_rgb() const;
+    [[nodiscard]] std::vector<std::uint8_t> interleaved_rgba() const;
 };
 
+class Session {
+public:
+    [[nodiscard]] static Session open(std::span<const std::uint8_t> dat_bytes);
+    [[nodiscard]] static Session open(const DatFile& dat);
+
+    [[nodiscard]] const DatFile& dat_file() const noexcept;
+    [[nodiscard]] ConvertedImage render(
+        const ConvertOptions& options = {},
+        ConvertDebugState* debug_state = nullptr
+    ) const;
+
+private:
+    explicit Session(DatFile dat);
+
+    DatFile dat_;
+};
+
+[[nodiscard]] ConvertedImage convert_dat_bytes_to_bgr(
+    std::span<const std::uint8_t> dat_bytes,
+    const ConvertOptions& options = {},
+    ConvertDebugState* debug_state = nullptr
+);
 [[nodiscard]] ConvertedImage convert_dat_to_bgr(
     const DatFile& dat,
     const ConvertOptions& options = {},

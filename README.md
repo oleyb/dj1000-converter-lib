@@ -54,15 +54,30 @@ What should stay separate is the browser application itself. A future web app re
 
 ## Public Library Surface
 
-The intended downstream entry point is [`converter.hpp`](native/include/dj1000/converter.hpp).
+The intended downstream entry points are:
 
-It exposes:
+- [`native/include/dj1000/converter.hpp`](native/include/dj1000/converter.hpp) for C++ consumers
+- [`native/include/dj1000/c_api.h`](native/include/dj1000/c_api.h) for C, FFI, and WASM-facing consumers
+
+The C++ surface exposes:
 
 - `dj1000::ConvertOptions`
 - `dj1000::ConvertDebugState`
 - `dj1000::ConvertedImage`
+- `dj1000::Session`
+- `dj1000::convert_dat_bytes_to_bgr(...)`
 - `dj1000::convert_dat_to_bgr(...)`
 - `dj1000::write_bmp(...)`
+
+The C surface exposes:
+
+- `dj1000_convert_options`
+- `dj1000_image`
+- `dj1000_convert_dat(...)`
+- `dj1000_session_open(...)`
+- `dj1000_session_render(...)`
+- `dj1000_session_free(...)`
+- `dj1000_image_free(...)`
 
 That keeps downstream apps away from the internal pipeline stages.
 
@@ -81,6 +96,31 @@ Build options:
 - `-DDJ1000_BUILD_CLI=ON|OFF`
 - `-DDJ1000_BUILD_TESTS=ON|OFF`
 - `-DDJ1000_INSTALL=ON|OFF`
+- `-DDJ1000_BUILD_WASM=ON|OFF`
+
+## WebAssembly Build
+
+The WASM target is optional and only requires Emscripten when you explicitly enable it.
+
+Example:
+
+```bash
+emcmake cmake -S . -B build-wasm -G Ninja \
+  -DDJ1000_BUILD_WASM=ON \
+  -DDJ1000_BUILD_CLI=OFF \
+  -DDJ1000_BUILD_TESTS=OFF
+cmake --build build-wasm --target dj1000_wasm
+```
+
+Outputs:
+
+- `build-wasm/native/dj1000_wasm.mjs`
+- `build-wasm/native/dj1000_wasm.wasm`
+- `build-wasm/native/dj1000_wasm_api.mjs`
+
+The generated module exposes a low-level WASM bridge plus a small JS helper that returns RGBA pixel buffers for browser or Node consumers. The full workflow is documented in [WebAssembly Build](docs/wasm.md).
+
+There is also a tiny static browser consumer at [examples/wasm-browser](examples/wasm-browser) that shows how a separate web app can import the built helper and draw the converted RGBA pixels into a `<canvas>`.
 
 ## Install / Consume As A Dependency
 
@@ -122,6 +162,7 @@ python3 tools/verify_native_reference_corpus.py --dataset-root /path/to/MDSC
 
 - [Repo Architecture](docs/repo-architecture.md)
 - [Development Setup](docs/development.md)
+- [WebAssembly Build](docs/wasm.md)
 - [DLL Verification](docs/dll-verification.md)
 - [Reverse Engineering Notes](docs/reverse-engineering.md)
 - [Native Rewrite Plan](docs/native-rewrite-plan.md)

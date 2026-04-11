@@ -24,6 +24,12 @@ Recommended macOS setup:
 brew install cmake ninja python
 ```
 
+Optional WASM toolchain on macOS:
+
+```bash
+brew install emscripten
+```
+
 Build and test:
 
 ```bash
@@ -31,6 +37,18 @@ cmake -S . -B build -G Ninja
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+Optional WASM build:
+
+```bash
+emcmake cmake -S . -B build-wasm -G Ninja \
+  -DDJ1000_BUILD_WASM=ON \
+  -DDJ1000_BUILD_CLI=OFF \
+  -DDJ1000_BUILD_TESTS=OFF
+cmake --build build-wasm --target dj1000_wasm
+```
+
+The WASM-specific workflow is documented in [docs/wasm.md](docs/wasm.md).
 
 ## Optional Legacy Verification Setup
 
@@ -75,6 +93,7 @@ When you learn something new about the original converter, update the docs in th
 - [`docs/native-rewrite-plan.md`](docs/native-rewrite-plan.md) for milestones and remaining work
 - [`docs/repo-architecture.md`](docs/repo-architecture.md) when repo boundaries or public surfaces change
 - [`docs/development.md`](docs/development.md) when setup or workflow changes
+- [`docs/wasm.md`](docs/wasm.md) when WASM build or embedding details change
 
 ## Repository Philosophy
 
@@ -87,12 +106,17 @@ That means:
 - reverse-engineering notes belong here
 - desktop apps and browser UIs should live elsewhere and depend on this repo
 
-## Future Binding Direction
+## Binding Direction
 
-The current public surface is a C++ API. For wide downstream adoption, a small stable C API is a good future step because it makes it easier to:
+The repo now has two intended public surfaces:
+
+- a small C++ API in [`native/include/dj1000/converter.hpp`](native/include/dj1000/converter.hpp)
+- a stable C API in [`native/include/dj1000/c_api.h`](native/include/dj1000/c_api.h)
+
+That makes it easier to:
 
 - embed the converter in desktop apps
 - bind into other languages
 - expose a WASM-friendly boundary
 
-That API does not need to exist before the repo is published, but changes to the current C++ surface should keep that future direction in mind.
+Changes to those headers should be treated more carefully than internal stage-helper changes.

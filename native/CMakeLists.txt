@@ -12,12 +12,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 option(DJ1000_BUILD_CLI "Build the standalone dj1000 CLI" ON)
 option(DJ1000_BUILD_TESTS "Build the native test suite" ON)
 option(DJ1000_INSTALL "Enable install/export packaging targets" ON)
+option(DJ1000_BUILD_WASM "Build the standalone WebAssembly module" OFF)
 
 add_library(dj1000_native_lib
     src/bmp.cpp
     src/bright_vertical_gate.cpp
+    src/c_api.cpp
     src/converter.cpp
+    src/converter_io.cpp
     src/dat_file.cpp
+    src/dat_file_io.cpp
     src/geometry_copy.cpp
     src/index_view.cpp
     src/large_export_pipeline.cpp
@@ -64,6 +68,9 @@ target_include_directories(dj1000_native_lib
 target_compile_options(dj1000_native_lib PRIVATE
     $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall -Wextra -Wpedantic>
 )
+if(EMSCRIPTEN)
+    target_compile_options(dj1000_native_lib PRIVATE -fexceptions)
+endif()
 
 if(DJ1000_BUILD_CLI)
     add_executable(dj1000
@@ -218,6 +225,21 @@ if(DJ1000_BUILD_TESTS)
     )
     target_link_libraries(test_quantize_stage PRIVATE dj1000_native_lib)
 
+    add_executable(test_converter
+        tests/test_converter.cpp
+    )
+    target_link_libraries(test_converter PRIVATE dj1000_native_lib)
+
+    add_executable(test_session
+        tests/test_session.cpp
+    )
+    target_link_libraries(test_session PRIVATE dj1000_native_lib)
+
+    add_executable(test_c_api
+        tests/test_c_api.cpp
+    )
+    target_link_libraries(test_c_api PRIVATE dj1000_native_lib)
+
     enable_testing()
     add_test(NAME test_index_view COMMAND test_index_view)
     add_test(NAME test_resample_lut COMMAND test_resample_lut)
@@ -248,6 +270,46 @@ if(DJ1000_BUILD_TESTS)
     add_test(NAME test_source_center_stage COMMAND test_source_center_stage)
     add_test(NAME test_source_stage COMMAND test_source_stage)
     add_test(NAME test_quantize_stage COMMAND test_quantize_stage)
+    add_test(NAME test_converter COMMAND test_converter)
+    add_test(NAME test_session COMMAND test_session)
+    add_test(NAME test_c_api COMMAND test_c_api)
+endif()
+
+if(DJ1000_BUILD_WASM)
+    if(NOT EMSCRIPTEN)
+        message(FATAL_ERROR "DJ1000_BUILD_WASM requires Emscripten. Configure with emcmake cmake ...")
+    endif()
+
+    add_executable(dj1000_wasm
+        src/wasm_api.cpp
+    )
+    target_link_libraries(dj1000_wasm PRIVATE dj1000_native_lib)
+    target_compile_options(dj1000_wasm PRIVATE -fexceptions)
+    set_target_properties(dj1000_wasm PROPERTIES
+        OUTPUT_NAME dj1000_wasm
+        SUFFIX .mjs
+    )
+    target_link_options(dj1000_wasm PRIVATE
+        --no-entry
+        -fexceptions
+        -sALLOW_MEMORY_GROWTH=1
+        -sDISABLE_EXCEPTION_CATCHING=0
+        -sENVIRONMENT=web,worker,node
+        -sEXPORT_ES6=1
+        -sEXPORT_NAME=createDj1000Module
+        -sEXPORTED_FUNCTIONS=[_malloc,_free,_dj1000_wasm_convert_dat_rgba,_dj1000_wasm_session_open,_dj1000_wasm_session_render_rgba,_dj1000_wasm_session_free,_dj1000_wasm_free_buffer,_dj1000_wasm_free_string]
+        -sEXPORTED_RUNTIME_METHODS=[UTF8ToString,HEAP32,HEAPU8,HEAPU32]
+        -sFILESYSTEM=0
+        -sMODULARIZE=1
+        -sNO_EXIT_RUNTIME=1
+    )
+    add_custom_command(
+        TARGET dj1000_wasm POST_BUILD
+        COMMAND
+            ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/wasm/dj1000_wasm_api.mjs
+            $<TARGET_FILE_DIR:dj1000_wasm>/dj1000_wasm_api.mjs
+    )
 endif()
 
 if(DJ1000_INSTALL)

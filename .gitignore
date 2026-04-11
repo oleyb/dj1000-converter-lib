@@ -36,6 +36,7 @@ cmake-build-*/
 /tmp_debug/
 /photorun/
 /build/
+/build-*/
 /dist/
 
 # Original vendor installer media and extracted binaries
