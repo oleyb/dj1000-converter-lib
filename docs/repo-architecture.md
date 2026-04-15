@@ -77,9 +77,15 @@ Current direction:
 
 - keep a small high-level C++ API
 - keep a stable C API for broader embedding and WASM/language bindings
+- expose pipeline choice at the top level rather than exposing reverse-engineered stage details
 - support both direct one-shot conversion and per-image session workflows
 - let per-image sessions cache slider-independent pipeline work so editor-style apps can rerender efficiently
 - keep the WASM target as a thin build/binding layer over the same native library
+
+That top-level pipeline choice currently means:
+
+- `legacy`: the DLL-faithful reverse-engineered converter path
+- `modern`: a separate high-resolution render path focused on denoise, cleaner tone mapping, and better resizing rather than PhotoRun parity
 
 The public API should not expose individual reverse-engineered stage helpers unless there is a strong reason.
 

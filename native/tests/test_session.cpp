@@ -67,6 +67,25 @@ int main() {
     const auto second_session_large = session.render(second_large_options);
     assert(second_direct_large.interleaved_rgba() == second_session_large.interleaved_rgba());
 
+    dj1000::ConvertOptions modern_options;
+    modern_options.pipeline = dj1000::ConversionPipeline::Modern;
+    modern_options.size = dj1000::ExportSize::Large;
+    modern_options.sliders.vividness = 5;
+    modern_options.sliders.sharpness = 5;
+    const auto direct_modern = dj1000::convert_dat_bytes_to_bgr(bytes, modern_options);
+    const auto session_modern = session.render(modern_options);
+    assert(direct_modern.width == 504);
+    assert(direct_modern.height == 378);
+    assert(direct_modern.interleaved_rgba() == session_modern.interleaved_rgba());
+
+    modern_options.size = dj1000::ExportSize::Normal;
+    modern_options.sliders.brightness = 5;
+    const auto direct_modern_normal = dj1000::convert_dat_bytes_to_bgr(bytes, modern_options);
+    const auto session_modern_normal = session.render(modern_options);
+    assert(direct_modern_normal.width == 320);
+    assert(direct_modern_normal.height == 240);
+    assert(direct_modern_normal.interleaved_rgb() == session_modern_normal.interleaved_rgb());
+
     std::cout << "test_session passed\n";
     return 0;
 }

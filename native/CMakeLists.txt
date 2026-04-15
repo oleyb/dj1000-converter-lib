@@ -13,6 +13,84 @@ option(DJ1000_BUILD_CLI "Build the standalone dj1000 CLI" ON)
 option(DJ1000_BUILD_TESTS "Build the native test suite" ON)
 option(DJ1000_INSTALL "Enable install/export packaging targets" ON)
 option(DJ1000_BUILD_WASM "Build the standalone WebAssembly module" OFF)
+option(DJ1000_ENABLE_ADOBE_DNG_SDK "Build the Adobe DNG SDK-backed modern RAW exporter when the SDK is available" ON)
+
+set(
+    DJ1000_ADOBE_DNG_SDK_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../dng_sdk_1_7_1"
+    CACHE PATH
+    "Path to the Adobe DNG SDK root directory"
+)
+
+set(DJ1000_HAVE_ADOBE_DNG_SDK OFF)
+if(
+    DJ1000_ENABLE_ADOBE_DNG_SDK
+    AND EXISTS "${DJ1000_ADOBE_DNG_SDK_ROOT}/dng_sdk/source/dng_negative.h"
+)
+    set(DJ1000_HAVE_ADOBE_DNG_SDK ON)
+
+    file(
+        GLOB DJ1000_ADOBE_DNG_SDK_SOURCES
+        CONFIGURE_DEPENDS
+        "${DJ1000_ADOBE_DNG_SDK_ROOT}/dng_sdk/source/*.cpp"
+    )
+    list(
+        REMOVE_ITEM
+        DJ1000_ADOBE_DNG_SDK_SOURCES
+        "${DJ1000_ADOBE_DNG_SDK_ROOT}/dng_sdk/source/dng_validate.cpp"
+        "${DJ1000_ADOBE_DNG_SDK_ROOT}/dng_sdk/source/dng_jxl.cpp"
+        "${DJ1000_ADOBE_DNG_SDK_ROOT}/dng_sdk/source/dng_update_meta.cpp"
+        "${DJ1000_ADOBE_DNG_SDK_ROOT}/dng_sdk/source/dng_xmp_sdk.cpp"
+    )
+
+    add_library(dj1000_adobe_dng_sdk STATIC
+        ${DJ1000_ADOBE_DNG_SDK_SOURCES}
+        src/adobe_dng_sdk_jxl_stub.cpp
+    )
+    set_target_properties(dj1000_adobe_dng_sdk PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_include_directories(dj1000_adobe_dng_sdk
+        SYSTEM PRIVATE
+            ${DJ1000_ADOBE_DNG_SDK_ROOT}/dng_sdk/source
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/adobe_dng_sdk_stubs
+    )
+
+    set(DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES)
+    if(APPLE)
+        list(APPEND DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES qMacOS=1 qWinOS=0 qLinux=0)
+    elseif(WIN32)
+        list(APPEND DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES qMacOS=0 qWinOS=1 qLinux=0)
+    else()
+        list(APPEND DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES qMacOS=0 qWinOS=0 qLinux=1)
+    endif()
+
+    find_package(ZLIB REQUIRED)
+    find_package(Threads REQUIRED)
+    target_compile_definitions(dj1000_adobe_dng_sdk PRIVATE
+        ${DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES}
+        qDNGUseXMP=0
+        qDNGUseLibJPEG=0
+        qDNGValidate=0
+        qDNGValidateTarget=0
+        qDNGThreadSafe=1
+    )
+    target_link_libraries(dj1000_adobe_dng_sdk PRIVATE
+        Threads::Threads
+        ZLIB::ZLIB
+    )
+    if(APPLE)
+        find_library(DJ1000_COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+        find_library(DJ1000_CARBON_FRAMEWORK Carbon REQUIRED)
+        target_link_libraries(dj1000_adobe_dng_sdk PUBLIC
+            ${DJ1000_COREFOUNDATION_FRAMEWORK}
+            ${DJ1000_CARBON_FRAMEWORK}
+        )
+    endif()
+    target_compile_options(dj1000_adobe_dng_sdk PRIVATE
+        $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-w>
+    )
+endif()
 
 add_library(dj1000_native_lib
     src/bmp.cpp
@@ -26,6 +104,11 @@ add_library(dj1000_native_lib
     src/index_view.cpp
     src/large_export_pipeline.cpp
     src/large_vertical_resample.cpp
+    src/modern_export_pipeline.cpp
+    src/modern_dng.cpp
+    src/modern_dng_sdk.cpp
+    src/modern_raw_frame.cpp
+    src/modern_sensor_frame.cpp
     src/nonlarge_geometry.cpp
     src/nonlarge_post_geometry_pipeline.cpp
     src/nonlarge_source_pipeline.cpp
@@ -70,6 +153,25 @@ target_compile_options(dj1000_native_lib PRIVATE
 )
 if(EMSCRIPTEN)
     target_compile_options(dj1000_native_lib PRIVATE -fexceptions)
+endif()
+if(DJ1000_HAVE_ADOBE_DNG_SDK)
+    target_link_libraries(dj1000_native_lib PRIVATE dj1000_adobe_dng_sdk)
+    target_include_directories(dj1000_native_lib
+        SYSTEM PRIVATE
+            ${DJ1000_ADOBE_DNG_SDK_ROOT}/dng_sdk/source
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/adobe_dng_sdk_stubs
+    )
+    target_compile_definitions(dj1000_native_lib PRIVATE
+        DJ1000_HAVE_ADOBE_DNG_SDK=1
+        ${DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES}
+        qDNGUseXMP=0
+        qDNGUseLibJPEG=0
+        qDNGValidate=0
+        qDNGValidateTarget=0
+        qDNGThreadSafe=1
+    )
+else()
+    target_compile_definitions(dj1000_native_lib PRIVATE DJ1000_HAVE_ADOBE_DNG_SDK=0)
 endif()
 
 if(DJ1000_BUILD_CLI)
@@ -230,6 +332,33 @@ if(DJ1000_BUILD_TESTS)
     )
     target_link_libraries(test_converter PRIVATE dj1000_native_lib)
 
+    add_executable(test_modern_pipeline
+        tests/test_modern_pipeline.cpp
+    )
+    target_link_libraries(test_modern_pipeline PRIVATE dj1000_native_lib)
+
+    add_executable(test_modern_raw_frame
+        tests/test_modern_raw_frame.cpp
+    )
+    target_link_libraries(test_modern_raw_frame PRIVATE dj1000_native_lib)
+
+    add_executable(test_modern_sensor_frame
+        tests/test_modern_sensor_frame.cpp
+    )
+    target_link_libraries(test_modern_sensor_frame PRIVATE dj1000_native_lib)
+
+    add_executable(test_modern_dng
+        tests/test_modern_dng.cpp
+    )
+    target_link_libraries(test_modern_dng PRIVATE dj1000_native_lib)
+
+    if(DJ1000_HAVE_ADOBE_DNG_SDK)
+        add_executable(test_modern_dng_sdk
+            tests/test_modern_dng_sdk.cpp
+        )
+        target_link_libraries(test_modern_dng_sdk PRIVATE dj1000_native_lib)
+    endif()
+
     add_executable(test_session
         tests/test_session.cpp
     )
@@ -271,6 +400,13 @@ if(DJ1000_BUILD_TESTS)
     add_test(NAME test_source_stage COMMAND test_source_stage)
     add_test(NAME test_quantize_stage COMMAND test_quantize_stage)
     add_test(NAME test_converter COMMAND test_converter)
+    add_test(NAME test_modern_pipeline COMMAND test_modern_pipeline)
+    add_test(NAME test_modern_raw_frame COMMAND test_modern_raw_frame)
+    add_test(NAME test_modern_sensor_frame COMMAND test_modern_sensor_frame)
+    add_test(NAME test_modern_dng COMMAND test_modern_dng)
+    if(DJ1000_HAVE_ADOBE_DNG_SDK)
+        add_test(NAME test_modern_dng_sdk COMMAND test_modern_dng_sdk)
+    endif()
     add_test(NAME test_session COMMAND test_session)
     add_test(NAME test_c_api COMMAND test_c_api)
 endif()
@@ -313,6 +449,16 @@ if(DJ1000_BUILD_WASM)
 endif()
 
 if(DJ1000_INSTALL)
+    if(DJ1000_HAVE_ADOBE_DNG_SDK)
+        install(
+            TARGETS dj1000_adobe_dng_sdk
+            EXPORT dj1000Targets
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+    endif()
+
     install(
         TARGETS dj1000_native_lib
         EXPORT dj1000Targets

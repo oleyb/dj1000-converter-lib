@@ -71,6 +71,15 @@ The C++ surface exposes:
 
 `dj1000::Session` is intended for editor-style consumers. It keeps the parsed DAT open and caches slider-independent intermediate stages per image, so repeated renders with different edit settings do less work than one-shot conversion.
 
+`dj1000::ConvertOptions` now supports two conversion pipelines:
+
+- `dj1000::ConversionPipeline::Legacy`
+  keeps the original PhotoRun / `DsGraph.dll` behavior as closely as possible and remains the default
+- `dj1000::ConversionPipeline::Modern`
+  uses a modern-only calibrated sensor-frame, demosaic, denoise, white-balance, tone-mapping, resize, and DNG-export path that is intentionally not DLL-faithful
+
+That split lets downstream apps choose between historical fidelity and a cleaner modern rendering path without forking the core library.
+
 The C surface exposes:
 
 - `dj1000_convert_options`
@@ -82,6 +91,11 @@ The C surface exposes:
 - `dj1000_image_free(...)`
 
 That keeps downstream apps away from the internal pipeline stages.
+
+The C API mirrors the same pipeline choice through `dj1000_convert_options.pipeline`, with:
+
+- `DJ1000_PIPELINE_LEGACY`
+- `DJ1000_PIPELINE_MODERN`
 
 ## Build
 
@@ -99,6 +113,19 @@ Build options:
 - `-DDJ1000_BUILD_TESTS=ON|OFF`
 - `-DDJ1000_INSTALL=ON|OFF`
 - `-DDJ1000_BUILD_WASM=ON|OFF`
+
+## Modern Raw Tools
+
+The CLI also exposes modern-only raw inspection and export commands:
+
+```bash
+dj1000 modern-dump-raw-stats INPUT.DAT
+dj1000 modern-dump-sensor-frame INPUT.DAT
+dj1000 modern-export-dng INPUT.DAT OUTPUT.dng
+dj1000 modern-export-bmp INPUT.DAT OUTPUT.bmp [small|normal|large]
+```
+
+These commands all stay outside the DLL-faithful path. They are intended for modern decode research, DNG export, and non-legacy rendering experiments without risking regressions in the byte-for-byte verified legacy pipeline.
 
 ## WebAssembly Build
 
@@ -166,6 +193,7 @@ python3 tools/verify_native_reference_corpus.py --dataset-root /path/to/MDSC
 - [Development Setup](docs/development.md)
 - [WebAssembly Build](docs/wasm.md)
 - [DLL Verification](docs/dll-verification.md)
+- [Modern Raw Roadmap](docs/modern-raw-roadmap.md)
 - [Reverse Engineering Notes](docs/reverse-engineering.md)
 - [Native Rewrite Plan](docs/native-rewrite-plan.md)
 

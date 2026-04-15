@@ -3,6 +3,7 @@
 #include "export_pipeline_cache.hpp"
 #include "dj1000/large_export_pipeline.hpp"
 #include "dj1000/normal_export_pipeline.hpp"
+#include "modern_export_pipeline.hpp"
 
 #include <bit>
 #include <memory>
@@ -68,21 +69,27 @@ void populate_debug_state(ConvertDebugState* target, const LargeExportDebugState
 }  // namespace
 
 enum class SessionPipelineKind {
-    Nonlarge,
-    Large,
+    LegacyNonlarge,
+    LegacyLarge,
+    ModernLargeBase,
 };
 
 struct SessionCacheKey {
-    SessionPipelineKind pipeline_kind = SessionPipelineKind::Nonlarge;
+    SessionPipelineKind pipeline_kind = SessionPipelineKind::LegacyNonlarge;
     bool has_source_gain = false;
     std::uint64_t source_gain_bits = 0;
 
     [[nodiscard]] bool operator==(const SessionCacheKey& other) const noexcept = default;
 };
 
-struct SessionCacheEntry {
+struct LegacySessionCacheEntry {
     SessionCacheKey key;
     std::shared_ptr<const CachedPostGeometryStage> stage;
+};
+
+struct ModernSessionCacheEntry {
+    SessionCacheKey key;
+    std::shared_ptr<const CachedModernStage> stage;
 };
 
 struct SessionState {
@@ -91,7 +98,8 @@ struct SessionState {
 
     DatFile dat;
     mutable std::mutex cache_mutex;
-    mutable std::vector<SessionCacheEntry> cache_entries;
+    mutable std::vector<LegacySessionCacheEntry> legacy_cache_entries;
+    mutable std::vector<ModernSessionCacheEntry> modern_cache_entries;
 };
 
 namespace {
@@ -103,12 +111,15 @@ void validate_plane_sizes(const RgbBytePlanes& planes) {
 }
 
 [[nodiscard]] SessionPipelineKind pipeline_kind_for_size(ExportSize size) {
-    return size == ExportSize::Large ? SessionPipelineKind::Large : SessionPipelineKind::Nonlarge;
+    return size == ExportSize::Large ? SessionPipelineKind::LegacyLarge : SessionPipelineKind::LegacyNonlarge;
 }
 
 [[nodiscard]] SessionCacheKey build_session_cache_key(const ConvertOptions& options) {
     SessionCacheKey key;
-    key.pipeline_kind = pipeline_kind_for_size(options.size);
+    key.pipeline_kind =
+        options.pipeline == ConversionPipeline::Modern
+            ? SessionPipelineKind::ModernLargeBase
+            : pipeline_kind_for_size(options.size);
     key.has_source_gain = options.source_gain.has_value();
     if (options.source_gain.has_value()) {
         key.source_gain_bits = std::bit_cast<std::uint64_t>(*options.source_gain);
@@ -163,6 +174,26 @@ ConvertedImage convert_dat_to_bgr(
     const ConvertOptions& options,
     ConvertDebugState* debug_state
 ) {
+    if (options.pipeline == ConversionPipeline::Modern) {
+        ModernExportDebugState modern_debug;
+        auto image = build_modern_export_planes(
+            dat,
+            options.size,
+            options.sliders,
+            debug_state != nullptr ? &modern_debug : nullptr,
+            options.source_gain
+        );
+        if (debug_state != nullptr) {
+            debug_state->source_gain = modern_debug.source_gain;
+            debug_state->post_rgb_scalar = modern_debug.exposure;
+        }
+        return {
+            .width = options.size == ExportSize::Large ? 504 : 320,
+            .height = options.size == ExportSize::Large ? 378 : 240,
+            .planes = std::move(image),
+        };
+    }
+
     if (options.size == ExportSize::Large) {
         LargeExportDebugState large_debug;
         const auto overrides = build_large_overrides(options);
@@ -215,7 +246,7 @@ namespace {
     const SessionState& state,
     const SessionCacheKey& key
 ) {
-    for (const auto& entry : state.cache_entries) {
+    for (const auto& entry : state.legacy_cache_entries) {
         if (entry.key == key) {
             return entry.stage;
         }
@@ -228,13 +259,34 @@ namespace {
     const ConvertOptions& options
 ) {
     const auto source_gain_override = options.source_gain;
-    if (pipeline_kind_for_size(options.size) == SessionPipelineKind::Large) {
+    if (pipeline_kind_for_size(options.size) == SessionPipelineKind::LegacyLarge) {
         return std::make_shared<const CachedPostGeometryStage>(
             build_cached_large_post_geometry_stage(state.dat, source_gain_override)
         );
     }
     return std::make_shared<const CachedPostGeometryStage>(
         build_cached_nonlarge_post_geometry_stage(state.dat, source_gain_override)
+    );
+}
+
+[[nodiscard]] std::shared_ptr<const CachedModernStage> find_cached_modern_stage_locked(
+    const SessionState& state,
+    const SessionCacheKey& key
+) {
+    for (const auto& entry : state.modern_cache_entries) {
+        if (entry.key == key) {
+            return entry.stage;
+        }
+    }
+    return nullptr;
+}
+
+[[nodiscard]] std::shared_ptr<const CachedModernStage> build_cached_modern_stage_for_options(
+    const SessionState& state,
+    const ConvertOptions& options
+) {
+    return std::make_shared<const CachedModernStage>(
+        build_cached_modern_stage(state.dat, options.source_gain)
     );
 }
 
@@ -255,7 +307,28 @@ namespace {
     if (const auto cached = find_cached_stage_locked(state, key)) {
         return cached;
     }
-    state.cache_entries.push_back({key, built});
+    state.legacy_cache_entries.push_back({key, built});
+    return built;
+}
+
+[[nodiscard]] std::shared_ptr<const CachedModernStage> get_or_build_cached_modern_stage(
+    const SessionState& state,
+    const ConvertOptions& options
+) {
+    const auto key = build_session_cache_key(options);
+    {
+        std::lock_guard<std::mutex> lock(state.cache_mutex);
+        if (const auto cached = find_cached_modern_stage_locked(state, key)) {
+            return cached;
+        }
+    }
+
+    auto built = build_cached_modern_stage_for_options(state, options);
+    std::lock_guard<std::mutex> lock(state.cache_mutex);
+    if (const auto cached = find_cached_modern_stage_locked(state, key)) {
+        return cached;
+    }
+    state.modern_cache_entries.push_back({key, built});
     return built;
 }
 
@@ -277,6 +350,26 @@ const DatFile& Session::dat_file() const noexcept {
 }
 
 ConvertedImage Session::render(const ConvertOptions& options, ConvertDebugState* debug_state) const {
+    if (options.pipeline == ConversionPipeline::Modern) {
+        const auto cached_stage = get_or_build_cached_modern_stage(*state_, options);
+        ModernExportDebugState modern_debug;
+        auto image = render_modern_export_from_cached_stage(
+            *cached_stage,
+            options.size,
+            options.sliders,
+            debug_state != nullptr ? &modern_debug : nullptr
+        );
+        if (debug_state != nullptr) {
+            debug_state->source_gain = modern_debug.source_gain;
+            debug_state->post_rgb_scalar = modern_debug.exposure;
+        }
+        return {
+            .width = options.size == ExportSize::Large ? 504 : 320,
+            .height = options.size == ExportSize::Large ? 378 : 240,
+            .planes = std::move(image),
+        };
+    }
+
     const auto cached_stage = get_or_build_cached_stage(*state_, options);
 
     if (options.size == ExportSize::Large) {

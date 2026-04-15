@@ -20,6 +20,11 @@ enum class ExportSize {
     Large,
 };
 
+enum class ConversionPipeline {
+    Legacy,
+    Modern,
+};
+
 struct SliderSettings {
     int red_balance = 100;
     int green_balance = 100;
@@ -32,6 +37,7 @@ struct SliderSettings {
 
 struct ConvertOptions {
     ExportSize size = ExportSize::Large;
+    ConversionPipeline pipeline = ConversionPipeline::Legacy;
     SliderSettings sliders{};
     std::optional<double> source_gain;
 };

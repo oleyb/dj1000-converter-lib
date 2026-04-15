@@ -1,9 +1,13 @@
 #include "dj1000/bmp.hpp"
 #include "dj1000/bright_vertical_gate.hpp"
+#include "dj1000/converter.hpp"
 #include "dj1000/dat_file.hpp"
 #include "dj1000/index_view.hpp"
 #include "dj1000/large_export_pipeline.hpp"
 #include "dj1000/large_vertical_resample.hpp"
+#include "dj1000/modern_raw_frame.hpp"
+#include "dj1000/modern_sensor_frame.hpp"
+#include "dj1000/modern_dng.hpp"
 #include "dj1000/nonlarge_geometry.hpp"
 #include "dj1000/nonlarge_post_geometry_pipeline.hpp"
 #include "dj1000/nonlarge_source_pipeline.hpp"
@@ -44,11 +48,101 @@ namespace {
 
 constexpr const char* kCliName = "dj1000";
 
+const char* cfa_color_name(dj1000::CfaColor color) {
+    switch (color) {
+        case dj1000::CfaColor::Unknown:
+            return "unknown";
+        case dj1000::CfaColor::Red:
+            return "red";
+        case dj1000::CfaColor::Green:
+            return "green";
+        case dj1000::CfaColor::Blue:
+            return "blue";
+    }
+    return "unknown";
+}
+
+const char* complementary_site_name(dj1000::ComplementarySite site) {
+    switch (site) {
+        case dj1000::ComplementarySite::Unknown:
+            return "unknown";
+        case dj1000::ComplementarySite::A:
+            return "A";
+        case dj1000::ComplementarySite::C:
+            return "C";
+        case dj1000::ComplementarySite::D:
+            return "D";
+        case dj1000::ComplementarySite::E:
+            return "E";
+    }
+    return "unknown";
+}
+
+void print_region_stats(const char* label, const dj1000::RawRegionStats& stats) {
+    std::cout
+        << label
+        << ": count=" << stats.count
+        << " min=" << stats.minimum
+        << " max=" << stats.maximum
+        << " mean=" << stats.mean
+        << '\n';
+}
+
+void print_series_preview(const char* label, std::span<const double> values, std::size_t preview_count = 8) {
+    std::cout << label << ":";
+    const std::size_t count = std::min(preview_count, values.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        std::cout << (index == 0 ? " " : ", ") << values[index];
+    }
+    if (values.size() > count) {
+        std::cout << " ... ";
+        const std::size_t tail_start = values.size() - count;
+        for (std::size_t index = tail_start; index < values.size(); ++index) {
+            std::cout << (index == tail_start ? "" : ", ") << values[index];
+        }
+    }
+    std::cout << '\n';
+}
+
+void print_count_preview(const char* label, std::span<const std::size_t> values, std::size_t preview_count = 8) {
+    std::cout << label << ":";
+    const std::size_t count = std::min(preview_count, values.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        std::cout << (index == 0 ? " " : ", ") << values[index];
+    }
+    if (values.size() > count) {
+        std::cout << " ... ";
+        const std::size_t tail_start = values.size() - count;
+        for (std::size_t index = tail_start; index < values.size(); ++index) {
+            std::cout << (index == tail_start ? "" : ", ") << values[index];
+        }
+    }
+    std::cout << '\n';
+}
+
+void print_linear_region_stats(const char* label, const dj1000::LinearRegionStats& stats) {
+    std::cout
+        << label
+        << ": count=" << stats.count
+        << " min=" << stats.minimum
+        << " max=" << stats.maximum
+        << " mean=" << stats.mean
+        << '\n';
+}
+
 void print_usage() {
     std::cerr
         << "Usage:\n"
         << "  " << kCliName << " info INPUT.DAT\n"
         << "  " << kCliName << " index-bmp INPUT.DAT OUTPUT.bmp\n"
+        << "  " << kCliName << " modern-dump-raw-stats INPUT.DAT\n"
+        << "  " << kCliName << " modern-dump-sensor-frame INPUT.DAT\n"
+        << "  " << kCliName << " modern-export-dng INPUT.DAT OUTPUT.dng\n"
+        << (dj1000::modern_dng_sdk_available()
+                ? std::string("  ") + kCliName + " modern-export-dng-sdk INPUT.DAT OUTPUT.dng\n"
+                : std::string())
+        << "  " << kCliName << " modern-export-linear-dng INPUT.DAT OUTPUT.dng [small|normal|large]\n"
+        << "  " << kCliName << " modern-export-bmp INPUT.DAT OUTPUT.bmp [small|normal|large]\n"
         << "  " << kCliName << " large-export-bmp INPUT.DAT OUTPUT.bmp\n"
         << "  " << kCliName << " large-export-bmp-controls INPUT.DAT OUTPUT.bmp RED GREEN BLUE CONTRAST BRIGHTNESS VIVIDNESS SHARPNESS\n"
         << "  " << kCliName << " large-export-bmp-tuned INPUT.DAT OUTPUT.bmp PARAM0 PARAM1 SCALAR THRESHOLD\n"
@@ -197,6 +291,19 @@ void write_int32_binary(const std::filesystem::path& path, std::span<const std::
     }
 }
 
+dj1000::ExportSize parse_export_size_name(const std::string& value) {
+    if (value == "small") {
+        return dj1000::ExportSize::Small;
+    }
+    if (value == "normal") {
+        return dj1000::ExportSize::Normal;
+    }
+    if (value == "large") {
+        return dj1000::ExportSize::Large;
+    }
+    throw std::runtime_error("export size must be one of: small, normal, large");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -231,6 +338,225 @@ int main(int argc, char** argv) {
             const auto index_view = dj1000::trans_to_index_view(dat.raw_payload());
             const auto rgb = dj1000::grayscale_to_rgb(index_view);
             dj1000::write_bmp24(output_path, dj1000::kIndexWidth, dj1000::kIndexHeight, rgb);
+            return 0;
+        }
+
+        if (command == "modern-export-bmp") {
+            if (argc < 4) {
+                print_usage();
+                return 1;
+            }
+
+            const std::filesystem::path input_path = argv[2];
+            const auto dat = dj1000::load_dat_file(input_path);
+            const std::filesystem::path output_path = argv[3];
+            dj1000::ConvertOptions options;
+            options.pipeline = dj1000::ConversionPipeline::Modern;
+            if (argc >= 5) {
+                options.size = parse_export_size_name(argv[4]);
+            }
+            dj1000::ConvertDebugState debug_state;
+            dj1000::write_bmp(dat, output_path, options, &debug_state);
+            std::cout
+                << "wrote modern export "
+                << output_path
+                << " source_gain=" << debug_state.source_gain
+                << " exposure=" << debug_state.post_rgb_scalar
+                << '\n';
+            return 0;
+        }
+
+        if (command == "modern-dump-raw-stats") {
+            const std::filesystem::path input_path = argv[2];
+            const auto dat = dj1000::load_dat_file(input_path);
+            const auto frame = dj1000::build_modern_raw_frame(dat);
+            const auto stats = dj1000::analyze_modern_raw_frame(frame);
+
+            std::cout
+                << "full_geometry: " << frame.full_width << "x" << frame.full_height << '\n'
+                << "active_geometry: x=" << frame.active_x
+                << " y=" << frame.active_y
+                << " width=" << frame.active_width
+                << " height=" << frame.active_height
+                << '\n'
+                << "cfa_repeat: " << frame.cfa_repeat_x << "x" << frame.cfa_repeat_y << '\n'
+                << "cfa_pattern: "
+                << cfa_color_name(frame.cfa_pattern[0]) << ", "
+                << cfa_color_name(frame.cfa_pattern[1]) << ", "
+                << cfa_color_name(frame.cfa_pattern[2]) << ", "
+                << cfa_color_name(frame.cfa_pattern[3])
+                << " locked=" << (frame.cfa_pattern_locked ? "true" : "false")
+                << '\n'
+                << "complementary_pattern: "
+                << complementary_site_name(frame.complementary_pattern[0]) << ", "
+                << complementary_site_name(frame.complementary_pattern[1]) << ", "
+                << complementary_site_name(frame.complementary_pattern[2]) << ", "
+                << complementary_site_name(frame.complementary_pattern[3])
+                << " locked=" << (frame.complementary_pattern_locked ? "true" : "false")
+                << '\n';
+
+            print_region_stats("active", stats.active);
+            print_region_stats("right_margin", stats.right_margin);
+            print_region_stats("bottom_margin", stats.bottom_margin);
+            print_region_stats("inactive", stats.inactive);
+            print_region_stats("site_even_even", stats.parity_sites[0]);
+            print_region_stats("site_even_odd", stats.parity_sites[1]);
+            print_region_stats("site_odd_even", stats.parity_sites[2]);
+            print_region_stats("site_odd_odd", stats.parity_sites[3]);
+
+            const auto calibration = dj1000::estimate_modern_raw_calibration(frame);
+            const auto corrected = dj1000::build_calibrated_modern_raw_frame(frame, calibration);
+            const auto corrected_stats = dj1000::analyze_modern_calibrated_raw_frame(corrected);
+
+            std::cout
+                << "estimated_black_levels: "
+                << calibration.black_levels[0] << ", "
+                << calibration.black_levels[1] << ", "
+                << calibration.black_levels[2] << ", "
+                << calibration.black_levels[3]
+                << '\n';
+            std::cout
+                << "leading_structured_right_margin_columns: " << stats.leading_structured_right_margin_columns << '\n'
+                << "leading_structured_bottom_margin_rows: " << stats.leading_structured_bottom_margin_rows << '\n'
+                << "dark_reference_right_margin_columns: " << stats.dark_reference_right_margin_columns << '\n'
+                << "dark_reference_bottom_margin_rows: " << stats.dark_reference_bottom_margin_rows << '\n'
+                << "row_offset_reference_right_margin_columns: "
+                << calibration.row_offset_reference_right_margin_columns << '\n'
+                << "column_offset_reference_bottom_margin_rows: "
+                << calibration.column_offset_reference_bottom_margin_rows << '\n'
+                << "trailing_hard_zero_right_margin_columns: " << stats.trailing_hard_zero_right_margin_columns << '\n'
+                << "trailing_hard_zero_bottom_margin_rows: " << stats.trailing_hard_zero_bottom_margin_rows << '\n'
+                << "black_reference_sample_count: " << calibration.black_reference_sample_count << '\n';
+            print_series_preview("estimated_row_offsets", calibration.active_row_offsets);
+            print_series_preview("estimated_column_offsets", calibration.full_column_offsets);
+
+            print_linear_region_stats("corrected_active", corrected_stats.active);
+            print_linear_region_stats("corrected_site_even_even", corrected_stats.parity_sites[0]);
+            print_linear_region_stats("corrected_site_even_odd", corrected_stats.parity_sites[1]);
+            print_linear_region_stats("corrected_site_odd_even", corrected_stats.parity_sites[2]);
+            print_linear_region_stats("corrected_site_odd_odd", corrected_stats.parity_sites[3]);
+
+            print_series_preview("full_row_means", stats.full_row_means);
+            print_series_preview("active_row_means", stats.active_row_means);
+            print_series_preview("full_column_means", stats.full_column_means);
+            print_series_preview("active_column_means", stats.active_column_means);
+            print_series_preview("right_margin_column_means", stats.right_margin_column_means);
+            print_count_preview("right_margin_column_nonzero_counts", stats.right_margin_column_nonzero_counts);
+            print_series_preview("right_margin_column_correlations", stats.right_margin_column_correlations);
+            print_series_preview("bottom_margin_row_means", stats.bottom_margin_row_means);
+            print_count_preview("bottom_margin_row_nonzero_counts", stats.bottom_margin_row_nonzero_counts);
+            print_series_preview("bottom_margin_row_correlations", stats.bottom_margin_row_correlations);
+            std::cout
+                << "trailing_zero_right_margin_columns: " << stats.trailing_zero_right_margin_columns << '\n'
+                << "trailing_zero_bottom_margin_rows: " << stats.trailing_zero_bottom_margin_rows << '\n';
+            print_series_preview("corrected_active_row_means", corrected_stats.active_row_means);
+            print_series_preview("corrected_active_column_means", corrected_stats.active_column_means);
+            return 0;
+        }
+
+        if (command == "modern-export-dng") {
+            if (argc < 4) {
+                print_usage();
+                return 1;
+            }
+
+            const std::filesystem::path input_path = argv[2];
+            const auto dat = dj1000::load_dat_file(input_path);
+            const std::filesystem::path output_path = argv[3];
+            dj1000::write_modern_dng(dat, output_path);
+            std::cout << "wrote modern DNG " << output_path << '\n';
+            return 0;
+        }
+
+        if (command == "modern-export-dng-sdk") {
+            if (argc < 4) {
+                print_usage();
+                return 1;
+            }
+
+            const std::filesystem::path input_path = argv[2];
+            const auto dat = dj1000::load_dat_file(input_path);
+            const std::filesystem::path output_path = argv[3];
+            dj1000::write_modern_dng_sdk(dat, output_path);
+            std::cout << "wrote modern Adobe SDK DNG " << output_path << '\n';
+            return 0;
+        }
+
+        if (command == "modern-export-linear-dng") {
+            if (argc < 4) {
+                print_usage();
+                return 1;
+            }
+
+            const std::filesystem::path input_path = argv[2];
+            const auto dat = dj1000::load_dat_file(input_path);
+            const std::filesystem::path output_path = argv[3];
+            dj1000::ExportSize size = dj1000::ExportSize::Large;
+            if (argc >= 5) {
+                size = parse_export_size_name(argv[4]);
+            }
+            dj1000::write_modern_linear_dng(dat, output_path, size);
+            std::cout << "wrote modern linear DNG " << output_path << '\n';
+            return 0;
+        }
+
+        if (command == "modern-dump-sensor-frame") {
+            const std::filesystem::path input_path = argv[2];
+            const auto dat = dj1000::load_dat_file(input_path);
+            const auto raw_frame = dj1000::build_modern_raw_frame(dat);
+            const auto calibration = dj1000::estimate_modern_raw_calibration(raw_frame);
+            const auto corrected = dj1000::build_calibrated_modern_raw_frame(raw_frame, calibration);
+            const auto sensor_frame = dj1000::build_modern_sensor_frame(raw_frame, calibration, corrected);
+            const auto sensor_stats = dj1000::analyze_modern_sensor_frame(sensor_frame);
+
+            std::cout
+                << "full_geometry: " << sensor_frame.full_width << "x" << sensor_frame.full_height << '\n'
+                << "active_geometry: x=" << sensor_frame.active_x
+                << " y=" << sensor_frame.active_y
+                << " width=" << sensor_frame.active_width
+                << " height=" << sensor_frame.active_height
+                << '\n'
+                << "cfa_repeat: " << sensor_frame.cfa_repeat_x << "x" << sensor_frame.cfa_repeat_y << '\n'
+                << "cfa_pattern: "
+                << cfa_color_name(sensor_frame.cfa_pattern[0]) << ", "
+                << cfa_color_name(sensor_frame.cfa_pattern[1]) << ", "
+                << cfa_color_name(sensor_frame.cfa_pattern[2]) << ", "
+                << cfa_color_name(sensor_frame.cfa_pattern[3])
+                << " locked=" << (sensor_frame.cfa_pattern_locked ? "true" : "false")
+                << '\n'
+                << "complementary_pattern: "
+                << complementary_site_name(sensor_frame.complementary_pattern[0]) << ", "
+                << complementary_site_name(sensor_frame.complementary_pattern[1]) << ", "
+                << complementary_site_name(sensor_frame.complementary_pattern[2]) << ", "
+                << complementary_site_name(sensor_frame.complementary_pattern[3])
+                << " locked=" << (sensor_frame.complementary_pattern_locked ? "true" : "false")
+                << '\n'
+                << "black_levels: "
+                << sensor_frame.black_levels[0] << ", "
+                << sensor_frame.black_levels[1] << ", "
+                << sensor_frame.black_levels[2] << ", "
+                << sensor_frame.black_levels[3]
+                << '\n'
+                << "white_levels: "
+                << sensor_frame.white_levels[0] << ", "
+                << sensor_frame.white_levels[1] << ", "
+                << sensor_frame.white_levels[2] << ", "
+                << sensor_frame.white_levels[3]
+                << '\n'
+                << "clip_fractions: "
+                << sensor_stats.clip_fractions[0] << ", "
+                << sensor_stats.clip_fractions[1] << ", "
+                << sensor_stats.clip_fractions[2] << ", "
+                << sensor_stats.clip_fractions[3]
+                << '\n';
+
+            print_linear_region_stats("sensor_active", sensor_stats.active);
+            print_linear_region_stats("sensor_site_even_even", sensor_stats.parity_sites[0]);
+            print_linear_region_stats("sensor_site_even_odd", sensor_stats.parity_sites[1]);
+            print_linear_region_stats("sensor_site_odd_even", sensor_stats.parity_sites[2]);
+            print_linear_region_stats("sensor_site_odd_odd", sensor_stats.parity_sites[3]);
+            print_series_preview("sensor_active_row_means", sensor_stats.active_row_means);
+            print_series_preview("sensor_active_column_means", sensor_stats.active_column_means);
             return 0;
         }
 

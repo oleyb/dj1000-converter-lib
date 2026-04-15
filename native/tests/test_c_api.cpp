@@ -34,6 +34,7 @@ int main() {
     dj1000_convert_options options;
     dj1000_init_convert_options(&options);
     assert(options.size == DJ1000_EXPORT_SIZE_LARGE);
+    assert(options.pipeline == DJ1000_PIPELINE_LEGACY);
     assert(options.pixel_format == DJ1000_PIXEL_FORMAT_RGBA);
     assert(options.sliders.red_balance == 100);
     assert(options.sliders.contrast == 3);
@@ -84,6 +85,34 @@ int main() {
 
     dj1000_image_free(&image);
 
+    options.pipeline = DJ1000_PIPELINE_MODERN;
+    options.size = DJ1000_EXPORT_SIZE_LARGE;
+    options.pixel_format = DJ1000_PIXEL_FORMAT_RGBA;
+    options.sliders.vividness = 5;
+    options.sliders.sharpness = 5;
+    const dj1000_status modern_status = dj1000_convert_dat(
+        bytes.data(),
+        bytes.size(),
+        &options,
+        &image,
+        &error_message
+    );
+    assert(modern_status == DJ1000_STATUS_OK);
+    assert(error_message == nullptr);
+    assert(image.width == 504);
+    assert(image.height == 378);
+
+    cpp_options.pipeline = dj1000::ConversionPipeline::Modern;
+    cpp_options.size = dj1000::ExportSize::Large;
+    cpp_options.sliders.vividness = 5;
+    cpp_options.sliders.sharpness = 5;
+    const auto cpp_modern_image = dj1000::convert_dat_bytes_to_bgr(bytes, cpp_options);
+    const auto expected_modern_rgba = cpp_modern_image.interleaved_rgba();
+    assert(expected_modern_rgba.size() == image.byte_count);
+    assert(std::equal(expected_modern_rgba.begin(), expected_modern_rgba.end(), image.pixels));
+
+    dj1000_image_free(&image);
+
     dj1000_session* session = nullptr;
     const dj1000_status session_open_status = dj1000_session_open(
         bytes.data(),
@@ -96,6 +125,7 @@ int main() {
     assert(error_message == nullptr);
 
     options.size = DJ1000_EXPORT_SIZE_SMALL;
+    options.pipeline = DJ1000_PIPELINE_LEGACY;
     options.pixel_format = DJ1000_PIXEL_FORMAT_RGB;
     options.sliders.brightness = 6;
     const dj1000_status session_render_status = dj1000_session_render(
@@ -110,12 +140,39 @@ int main() {
     assert(image.height == 240);
     assert(image.channels == 3);
 
+    cpp_options.pipeline = dj1000::ConversionPipeline::Legacy;
     cpp_options.size = dj1000::ExportSize::Small;
     cpp_options.sliders.brightness = 6;
     const auto session_expected = dj1000::convert_dat_bytes_to_bgr(bytes, cpp_options);
     const auto expected_rgb = session_expected.interleaved_rgb();
     assert(expected_rgb.size() == image.byte_count);
     assert(std::equal(expected_rgb.begin(), expected_rgb.end(), image.pixels));
+
+    dj1000_image_free(&image);
+
+    options.pipeline = DJ1000_PIPELINE_MODERN;
+    options.size = DJ1000_EXPORT_SIZE_NORMAL;
+    options.pixel_format = DJ1000_PIXEL_FORMAT_RGB;
+    options.sliders.brightness = 5;
+    const dj1000_status modern_session_status = dj1000_session_render(
+        session,
+        &options,
+        &image,
+        &error_message
+    );
+    assert(modern_session_status == DJ1000_STATUS_OK);
+    assert(error_message == nullptr);
+    assert(image.width == 320);
+    assert(image.height == 240);
+    assert(image.channels == 3);
+
+    cpp_options.pipeline = dj1000::ConversionPipeline::Modern;
+    cpp_options.size = dj1000::ExportSize::Normal;
+    cpp_options.sliders.brightness = 5;
+    const auto session_expected_modern = dj1000::convert_dat_bytes_to_bgr(bytes, cpp_options);
+    const auto expected_modern_rgb = session_expected_modern.interleaved_rgb();
+    assert(expected_modern_rgb.size() == image.byte_count);
+    assert(std::equal(expected_modern_rgb.begin(), expected_modern_rgb.end(), image.pixels));
 
     dj1000_image_free(&image);
     dj1000_session_free(session);

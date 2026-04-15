@@ -21,6 +21,11 @@ typedef enum dj1000_export_size {
     DJ1000_EXPORT_SIZE_LARGE = 2
 } dj1000_export_size;
 
+typedef enum dj1000_pipeline {
+    DJ1000_PIPELINE_LEGACY = 0,
+    DJ1000_PIPELINE_MODERN = 1
+} dj1000_pipeline;
+
 typedef enum dj1000_pixel_format {
     DJ1000_PIXEL_FORMAT_BGR = 0,
     DJ1000_PIXEL_FORMAT_RGB = 1,
@@ -39,6 +44,7 @@ typedef struct dj1000_slider_settings {
 
 typedef struct dj1000_convert_options {
     dj1000_export_size size;
+    dj1000_pipeline pipeline;
     dj1000_slider_settings sliders;
     int has_source_gain;
     double source_gain;

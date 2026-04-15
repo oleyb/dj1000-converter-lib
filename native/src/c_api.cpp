@@ -60,6 +60,15 @@ bool is_valid_export_size(dj1000_export_size size) {
     return false;
 }
 
+bool is_valid_pipeline(dj1000_pipeline pipeline) {
+    switch (pipeline) {
+        case DJ1000_PIPELINE_LEGACY:
+        case DJ1000_PIPELINE_MODERN:
+            return true;
+    }
+    return false;
+}
+
 bool is_valid_pixel_format(dj1000_pixel_format format) {
     switch (format) {
         case DJ1000_PIXEL_FORMAT_BGR:
@@ -82,9 +91,20 @@ dj1000::ExportSize to_cpp_export_size(dj1000_export_size size) {
     throw std::runtime_error("unsupported export size");
 }
 
+dj1000::ConversionPipeline to_cpp_pipeline(dj1000_pipeline pipeline) {
+    switch (pipeline) {
+        case DJ1000_PIPELINE_LEGACY:
+            return dj1000::ConversionPipeline::Legacy;
+        case DJ1000_PIPELINE_MODERN:
+            return dj1000::ConversionPipeline::Modern;
+    }
+    throw std::runtime_error("unsupported conversion pipeline");
+}
+
 dj1000::ConvertOptions to_cpp_options(const dj1000_convert_options& options) {
     dj1000::ConvertOptions converted;
     converted.size = to_cpp_export_size(options.size);
+    converted.pipeline = to_cpp_pipeline(options.pipeline);
     converted.sliders.red_balance = options.sliders.red_balance;
     converted.sliders.green_balance = options.sliders.green_balance;
     converted.sliders.blue_balance = options.sliders.blue_balance;
@@ -110,6 +130,10 @@ bool prepare_convert_options(
 
     if (!is_valid_export_size(effective_options->size)) {
         set_error_message(out_error_message, "invalid export size");
+        return false;
+    }
+    if (!is_valid_pipeline(effective_options->pipeline)) {
+        set_error_message(out_error_message, "invalid conversion pipeline");
         return false;
     }
     if (!is_valid_pixel_format(effective_options->pixel_format)) {
@@ -173,6 +197,7 @@ void dj1000_init_convert_options(dj1000_convert_options* options) {
     }
 
     options->size = DJ1000_EXPORT_SIZE_LARGE;
+    options->pipeline = DJ1000_PIPELINE_LEGACY;
     options->sliders.red_balance = 100;
     options->sliders.green_balance = 100;
     options->sliders.blue_balance = 100;
