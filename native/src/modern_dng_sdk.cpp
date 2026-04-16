@@ -70,14 +70,16 @@ constexpr std::array<double, 4> kLc9997NeutralCalibrationBias = {{
 }};
 
 constexpr std::array<double, 4> kLc9997AdobeProfileChannelScale = {{
-    0.8500000000000000,
+    0.7200000000000000,
     1.1000000000000001,
-    0.9500000000000000,
-    0.9500000000000000,
+    1.1400000000000000,
+    0.7400000000000000,
 }};
 
 constexpr double kLc9997AdobeTemperatureBiasKelvin = -240.0;
 constexpr double kLc9997AdobeTintBias = -122.0;
+constexpr float kLc9997ProfileSatRestore = 1.18f;
+constexpr float kLc9997ProfileValueRestore = 1.05f;
 
 constexpr std::array<std::array<double, 3>, 3> kXyzD50FromLinearSrgb = {{
     {{0.4360747, 0.3850649, 0.1430804}},
@@ -379,6 +381,29 @@ dng_matrix make_sdk_reduction_matrix1() {
     return matrix;
 }
 
+dng_hue_sat_map make_sdk_saturation_restore_map(float sat_scale, float value_scale) {
+    dng_hue_sat_map map;
+    constexpr uint32 kHueDivisions = 6;
+    constexpr uint32 kSatDivisions = 2;
+    map.SetDivisions(kHueDivisions, kSatDivisions, 1);
+
+    for (uint32 hue = 0; hue < kHueDivisions; ++hue) {
+        dng_hue_sat_map::HSBModify zero_sat{};
+        zero_sat.fHueShift = 0.0f;
+        zero_sat.fSatScale = 1.0f;
+        zero_sat.fValScale = 1.0f;
+        map.SetDelta(hue, 0, 0, zero_sat);
+
+        dng_hue_sat_map::HSBModify colored{};
+        colored.fHueShift = 0.0f;
+        colored.fSatScale = sat_scale;
+        colored.fValScale = value_scale;
+        map.SetDelta(hue, 1, 0, colored);
+    }
+
+    return map;
+}
+
 void apply_sdk_profile_channel_scale(
     dng_matrix& color_matrix,
     dng_matrix& forward_matrix,
@@ -515,6 +540,13 @@ AutoPtr<dng_negative> build_sdk_negative(
     profile->SetColorMatrix1(color_matrix);
     profile->SetForwardMatrix1(forward_matrix);
     profile->SetReductionMatrix1(reduction_matrix);
+    profile->SetHueSatMapEncoding(encoding_Linear);
+    profile->SetHueSatDeltas1(
+        make_sdk_saturation_restore_map(
+            kLc9997ProfileSatRestore,
+            kLc9997ProfileValueRestore
+        )
+    );
     negative->SetCameraWhiteXY(make_corrected_camera_white_xy(*negative, *profile, neutral));
     negative->AddProfile(profile);
 
