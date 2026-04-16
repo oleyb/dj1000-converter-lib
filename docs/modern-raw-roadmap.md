@@ -183,6 +183,15 @@ Current status:
 - first-pass DNG export is implemented as a dependency-light classic TIFF/DNG writer built from the modern `SensorFrame`
 - it is good enough for inspection and early interoperability testing
 - it is not yet the final word on CFA orientation, color matrices, or every optional metadata tag we may eventually want
+- an Adobe DNG SDK-backed true RAW path is also implemented and is now the preferred Photoshop / Adobe Camera Raw export route
+- that Adobe-backed route is a feature-gated build path:
+  - it requires an extracted Adobe DNG SDK checkout at configure time
+  - without that SDK present, native / WASM builds still work, but the Adobe true-RAW export path is unavailable
+- the currently chosen working baseline is the `v011` Adobe profile tuning:
+  - stronger complementary profile-channel scaling than the earliest Adobe-SDK bring-up
+  - the same `CameraWhiteXY` / import-white-point workflow we validated in ACR
+  - a small profile-layer hue/saturation restore map to recover some base color after calming the white-balance geometry
+- that baseline was chosen from a small real-world corpus, not only from a single chart shot
 
 Why:
 
@@ -197,6 +206,16 @@ Recommended DNG scope:
 - include black and white levels
 - include as-shot neutral / white-balance metadata when available
 - include a placeholder camera profile first, then improve calibration later
+
+Practical note from the current Adobe-SDK path:
+
+- the hard part is no longer basic DNG container validity
+- the remaining quality work is mostly in the embedded camera profile behavior:
+  - white-balance feel
+  - tint headroom
+  - color-family separation
+  - how much base saturation survives after the profile is made less twitchy
+- a public web build only gets Adobe-backed RAW export if the WASM build is also given the Adobe SDK at configure time
 
 ## Third-Party Library Recommendations
 
@@ -244,6 +263,14 @@ LibRaw is still a useful reference for raw data structures and processing flow, 
 5. add DNG export from `SensorFrame`
 6. compare two or three classical demosaic methods on real DATs
 
+What is effectively done already:
+
+- raw-frame classification
+- calibrated `SensorFrame` boundary
+- dependency-light DNG writer
+- Adobe DNG SDK true RAW writer
+- a first usable Adobe-profile baseline for Photoshop / ACR
+
 ### Experimental work second
 
 1. test joint demosaicing-and-denoising approaches on a small corpus
@@ -290,6 +317,7 @@ LibRaw is still a useful reference for raw data structures and processing flow, 
    - `dj1000 modern-export-dng INPUT.DAT OUTPUT.dng`
    Status:
    - done for a first-pass dependency-light DNG writer
+   - done for an Adobe DNG SDK-backed true RAW writer via `dj1000 modern-export-dng-sdk INPUT.DAT OUTPUT.dng`
 7. Use the stabilized `SensorFrame` as the entry point for modern demosaic experiments.
    Status:
    - done for the first modern renderer rewrite; `modern-export-bmp` now demosaics from `SensorFrame` instead of leaning on the legacy pregeometry/large-resample chain
@@ -297,16 +325,16 @@ LibRaw is still a useful reference for raw data structures and processing flow, 
 
 ## Best Next Steps
 
-1. Lock the red/blue CFA orientation with stronger evidence than the current provisional mapping.
-2. Improve the DNG metadata:
-   - measured color matrices
-   - better white-level modeling
-   - any missing compatibility tags that real raw processors care about
+1. Improve the Adobe RAW profile more selectively:
+   - keep the calmer `Temp` / `Tint` feel from the current baseline
+   - restore color punch and color-family separation without making the profile twitchy again
+   - prefer selective hue/sat tuning over more global matrix flattening
+2. Lock the red/blue CFA orientation with stronger evidence than the current provisional mapping.
 3. Compare two or three stronger demosaic strategies from the same `SensorFrame` boundary:
    - current directional green + smoothed chroma baseline
    - a stronger classical edge-aware method
    - a denoise-aware variant
-4. Decide whether to keep the current dependency-light DNG writer or move to a heavier writer stack such as the Adobe SDK or `libtiff`.
+4. Decide whether to keep the current dependency-light DNG writer as a secondary inspection path now that the Adobe SDK route is the preferred true RAW export.
 
 ## External References
 

@@ -57,28 +57,36 @@ if(
     )
 
     set(DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES)
-    if(APPLE)
-        list(APPEND DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES qMacOS=1 qWinOS=0 qLinux=0)
+    if(EMSCRIPTEN)
+        list(APPEND DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES qMacOS=0 qWinOS=0 qLinux=0 qWeb=1)
+    elseif(APPLE)
+        list(APPEND DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES qMacOS=1 qWinOS=0 qLinux=0 qWeb=0)
     elseif(WIN32)
-        list(APPEND DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES qMacOS=0 qWinOS=1 qLinux=0)
+        list(APPEND DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES qMacOS=0 qWinOS=1 qLinux=0 qWeb=0)
     else()
-        list(APPEND DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES qMacOS=0 qWinOS=0 qLinux=1)
+        list(APPEND DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES qMacOS=0 qWinOS=0 qLinux=1 qWeb=0)
     endif()
 
-    find_package(ZLIB REQUIRED)
-    find_package(Threads REQUIRED)
+    if(NOT EMSCRIPTEN)
+        find_package(ZLIB REQUIRED)
+        find_package(Threads REQUIRED)
+    endif()
     target_compile_definitions(dj1000_adobe_dng_sdk PRIVATE
         ${DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES}
         qDNGUseXMP=0
         qDNGUseLibJPEG=0
         qDNGValidate=0
         qDNGValidateTarget=0
-        qDNGThreadSafe=1
+        qDNGThreadSafe=$<IF:$<BOOL:${EMSCRIPTEN}>,0,1>
     )
-    target_link_libraries(dj1000_adobe_dng_sdk PRIVATE
-        Threads::Threads
-        ZLIB::ZLIB
-    )
+    if(EMSCRIPTEN)
+        target_compile_options(dj1000_adobe_dng_sdk PRIVATE -sUSE_ZLIB=1)
+    else()
+        target_link_libraries(dj1000_adobe_dng_sdk PRIVATE
+            Threads::Threads
+            ZLIB::ZLIB
+        )
+    endif()
     if(APPLE)
         find_library(DJ1000_COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
         find_library(DJ1000_CARBON_FRAMEWORK Carbon REQUIRED)
@@ -168,7 +176,7 @@ if(DJ1000_HAVE_ADOBE_DNG_SDK)
         qDNGUseLibJPEG=0
         qDNGValidate=0
         qDNGValidateTarget=0
-        qDNGThreadSafe=1
+        qDNGThreadSafe=$<IF:$<BOOL:${EMSCRIPTEN}>,0,1>
     )
 else()
     target_compile_definitions(dj1000_native_lib PRIVATE DJ1000_HAVE_ADOBE_DNG_SDK=0)
@@ -421,6 +429,11 @@ if(DJ1000_BUILD_WASM)
     )
     target_link_libraries(dj1000_wasm PRIVATE dj1000_native_lib)
     target_compile_options(dj1000_wasm PRIVATE -fexceptions)
+    if(DJ1000_HAVE_ADOBE_DNG_SDK)
+        target_compile_definitions(dj1000_wasm PRIVATE DJ1000_HAVE_ADOBE_DNG_SDK=1)
+    else()
+        target_compile_definitions(dj1000_wasm PRIVATE DJ1000_HAVE_ADOBE_DNG_SDK=0)
+    endif()
     set_target_properties(dj1000_wasm PROPERTIES
         OUTPUT_NAME dj1000_wasm
         SUFFIX .mjs
@@ -433,12 +446,15 @@ if(DJ1000_BUILD_WASM)
         -sENVIRONMENT=web,worker,node
         -sEXPORT_ES6=1
         -sEXPORT_NAME=createDj1000Module
-        -sEXPORTED_FUNCTIONS=[_malloc,_free,_dj1000_wasm_convert_dat_rgba,_dj1000_wasm_session_open,_dj1000_wasm_session_render_rgba,_dj1000_wasm_session_free,_dj1000_wasm_free_buffer,_dj1000_wasm_free_string]
+        -sEXPORTED_FUNCTIONS=[_malloc,_free,_dj1000_wasm_dng_support_available,_dj1000_wasm_convert_dat_rgba,_dj1000_wasm_convert_dat_dng,_dj1000_wasm_session_open,_dj1000_wasm_session_render_rgba,_dj1000_wasm_session_free,_dj1000_wasm_free_buffer,_dj1000_wasm_free_string]
         -sEXPORTED_RUNTIME_METHODS=[UTF8ToString,HEAP32,HEAPU8,HEAPU32]
         -sFILESYSTEM=0
         -sMODULARIZE=1
         -sNO_EXIT_RUNTIME=1
     )
+    if(DJ1000_HAVE_ADOBE_DNG_SDK)
+        target_link_options(dj1000_wasm PRIVATE -sUSE_ZLIB=1)
+    endif()
     add_custom_command(
         TARGET dj1000_wasm POST_BUILD
         COMMAND

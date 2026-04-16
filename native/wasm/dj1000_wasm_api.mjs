@@ -69,6 +69,8 @@ function makeRenderResult(module, pixelsPtr, widthPtr, heightPtr, byteCountPtr) 
 
 export async function createDj1000WasmConverter(moduleOptions = {}) {
   const module = await createDj1000Module(moduleOptions);
+  const supportsDng = typeof module._dj1000_wasm_dng_support_available === "function"
+    && module._dj1000_wasm_dng_support_available() !== 0;
 
   function convertDatToRgba(input, options = {}) {
     const bytes = toUint8Array(input);
@@ -122,6 +124,47 @@ export async function createDj1000WasmConverter(moduleOptions = {}) {
       module._free(byteCountPtr);
       module._free(heightPtr);
       module._free(widthPtr);
+      module._free(inputPtr);
+    }
+  }
+
+  function convertDatToDng(input) {
+    if (!supportsDng) {
+      throw new Error("DNG export is unavailable in this build.");
+    }
+    const bytes = toUint8Array(input);
+    const inputPtr = module._malloc(bytes.byteLength);
+    const byteCountPtr = module._malloc(4);
+    const errorPtrPtr = module._malloc(4);
+
+    module.HEAPU8.set(bytes, inputPtr);
+    module.HEAPU32[byteCountPtr >>> 2] = 0;
+    module.HEAPU32[errorPtrPtr >>> 2] = 0;
+
+    let dngPtr = 0;
+    try {
+      dngPtr = module._dj1000_wasm_convert_dat_dng(
+        inputPtr,
+        bytes.byteLength,
+        byteCountPtr,
+        errorPtrPtr,
+      );
+
+      if (dngPtr === 0) {
+        throw new Error(takeErrorMessage(module, errorPtrPtr) ?? "dj1000 DNG conversion failed");
+      }
+
+      const byteCount = module.HEAPU32[byteCountPtr >>> 2];
+      const dngBytes = module.HEAPU8.slice(dngPtr, dngPtr + byteCount);
+      module._dj1000_wasm_free_buffer(dngPtr);
+      dngPtr = 0;
+      return dngBytes;
+    } finally {
+      if (dngPtr !== 0) {
+        module._dj1000_wasm_free_buffer(dngPtr);
+      }
+      module._free(errorPtrPtr);
+      module._free(byteCountPtr);
       module._free(inputPtr);
     }
   }
@@ -225,7 +268,9 @@ export async function createDj1000WasmConverter(moduleOptions = {}) {
 
   return {
     module,
+    supportsDng,
     convertDatToRgba,
+    convertDatToDng,
     openSession,
   };
 }

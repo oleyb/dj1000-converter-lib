@@ -1,4 +1,6 @@
 #include "dj1000/c_api.h"
+#include "dj1000/dat_file.hpp"
+#include "dj1000/modern_dng.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -35,6 +37,21 @@ bool prepare_output_pointers(int* out_width, int* out_height, std::size_t* out_b
 
     *out_width = 0;
     *out_height = 0;
+    *out_byte_count = 0;
+    return true;
+}
+
+bool prepare_byte_count_pointer(std::size_t* out_byte_count, char** out_error_message) {
+    if (out_error_message != nullptr) {
+        *out_error_message = nullptr;
+    }
+    if (out_byte_count == nullptr) {
+        if (out_error_message != nullptr) {
+            *out_error_message = duplicate_error_text("out_byte_count must not be null");
+        }
+        return false;
+    }
+
     *out_byte_count = 0;
     return true;
 }
@@ -82,9 +99,37 @@ std::uint8_t* take_image_pixels(
     return pixels;
 }
 
+std::uint8_t* copy_owned_bytes(
+    const std::vector<std::uint8_t>& bytes,
+    std::size_t* out_byte_count,
+    char** out_error_message
+) {
+    auto* output = static_cast<std::uint8_t*>(std::malloc(bytes.size()));
+    if (output == nullptr) {
+        if (out_error_message != nullptr) {
+            *out_error_message = duplicate_error_text("out of memory allocating output bytes");
+        }
+        return nullptr;
+    }
+
+    if (!bytes.empty()) {
+        std::memcpy(output, bytes.data(), bytes.size());
+    }
+    *out_byte_count = bytes.size();
+    return output;
+}
+
 }  // namespace
 
 extern "C" {
+
+int dj1000_wasm_dng_support_available() {
+#if DJ1000_HAVE_ADOBE_DNG_SDK
+    return 1;
+#else
+    return 0;
+#endif
+}
 
 std::uint8_t* dj1000_wasm_convert_dat_rgba(
     const std::uint8_t* dat_bytes,
@@ -136,6 +181,54 @@ std::uint8_t* dj1000_wasm_convert_dat_rgba(
     }
 
     return take_image_pixels(&image, out_width, out_height, out_byte_count);
+}
+
+std::uint8_t* dj1000_wasm_convert_dat_dng(
+    const std::uint8_t* dat_bytes,
+    std::size_t dat_size,
+    std::size_t* out_byte_count,
+    char** out_error_message
+) {
+    if (!prepare_byte_count_pointer(out_byte_count, out_error_message)) {
+        return nullptr;
+    }
+#if !DJ1000_HAVE_ADOBE_DNG_SDK
+    if (out_error_message != nullptr) {
+        *out_error_message = duplicate_error_text(
+            "DNG export is unavailable in this build because Adobe DNG SDK support was not enabled"
+        );
+    }
+    return nullptr;
+#else
+    if (dat_bytes == nullptr) {
+        if (out_error_message != nullptr) {
+            *out_error_message = duplicate_error_text("dat_bytes must not be null");
+        }
+        return nullptr;
+    }
+    if (dat_size != dj1000::kExpectedDatSize) {
+        if (out_error_message != nullptr) {
+            *out_error_message = duplicate_error_text("DAT input must be exactly 0x20000 bytes");
+        }
+        return nullptr;
+    }
+
+    try {
+        const auto dat = dj1000::make_dat_file(std::span<const std::uint8_t>(dat_bytes, dat_size));
+        const auto dng_bytes = dj1000::build_modern_dng_sdk_bytes(dat);
+        return copy_owned_bytes(dng_bytes, out_byte_count, out_error_message);
+    } catch (const std::bad_alloc&) {
+        if (out_error_message != nullptr) {
+            *out_error_message = duplicate_error_text("out of memory");
+        }
+        return nullptr;
+    } catch (const std::exception& error) {
+        if (out_error_message != nullptr) {
+            *out_error_message = duplicate_error_text(error.what());
+        }
+        return nullptr;
+    }
+#endif
 }
 
 dj1000_session* dj1000_wasm_session_open(

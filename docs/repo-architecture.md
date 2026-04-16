@@ -87,6 +87,33 @@ That top-level pipeline choice currently means:
 - `legacy`: the DLL-faithful reverse-engineered converter path
 - `modern`: a separate high-resolution render path focused on denoise, cleaner tone mapping, and better resizing rather than PhotoRun parity
 
+## Recommended UI Shape
+
+Downstream apps should expose the two pipelines as two clearly different user intents, not as tiny implementation details:
+
+- `Legacy`
+  - default for users who want "what PhotoRun would have made"
+  - ideal for historical fidelity, comparisons, and parity testing
+- `Modern`
+  - explicit higher-quality / experimental path
+  - ideal for cleaner exports, true RAW DNG export, and non-legacy editing workflows
+
+Recommended UI behavior:
+
+- keep `Legacy` and `Modern` as a top-level choice
+- when `Modern` is selected, expose RAW-specific export options such as Adobe-SDK DNG when the build actually includes Adobe support
+- avoid mixing legacy-specific language with modern controls in the same panel
+- treat the modern RAW path as an advanced feature first, then simplify once its profile behavior is more settled
+
+For a downstream editor-style app, the cleanest first UI is probably:
+
+1. import DATs as usual
+2. choose `Pipeline: Legacy | Modern`
+3. if `Modern`, allow:
+   - rendered image export
+   - true RAW DNG export
+4. keep all per-image edit controls pipeline-aware so users never wonder which renderer they are looking at
+
 The public API should not expose individual reverse-engineered stage helpers unless there is a strong reason.
 
 ## Verification Principle

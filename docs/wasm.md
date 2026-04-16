@@ -15,6 +15,8 @@ Keeping it in this repo means:
 
 You only need Emscripten if you want the WASM target.
 
+If you also want WASM `.DAT -> true RAW .DNG` support, you must provide an extracted Adobe DNG SDK checkout at configure time. Without that SDK, the WASM target still builds and still supports RGBA conversion / editing sessions, but it intentionally reports DNG support as unavailable.
+
 On macOS with Homebrew:
 
 ```bash
@@ -28,6 +30,18 @@ emcmake cmake -S . -B build-wasm -G Ninja \
   -DDJ1000_BUILD_WASM=ON \
   -DDJ1000_BUILD_CLI=OFF \
   -DDJ1000_BUILD_TESTS=OFF
+cmake --build build-wasm --target dj1000_wasm
+```
+
+Adobe-enabled flow for true RAW DNG support:
+
+```bash
+emcmake cmake -S . -B build-wasm -G Ninja \
+  -DDJ1000_BUILD_WASM=ON \
+  -DDJ1000_BUILD_CLI=OFF \
+  -DDJ1000_BUILD_TESTS=OFF \
+  -DDJ1000_ENABLE_ADOBE_DNG_SDK=ON \
+  -DDJ1000_ADOBE_DNG_SDK_ROOT=/absolute/path/to/dng_sdk_1_7_1
 cmake --build build-wasm --target dj1000_wasm
 ```
 
@@ -72,6 +86,7 @@ Example:
 import { createDj1000WasmConverter } from "./dj1000_wasm_api.mjs";
 
 const converter = await createDj1000WasmConverter();
+console.log(converter.supportsDng);
 const session = converter.openSession(datBytes);
 const result = session.renderToRgba({
   size: "large",
@@ -95,6 +110,16 @@ The helper supports both styles:
 
 - `convertDatToRgba(datBytes, options)` for direct one-shot conversion
 - `openSession(datBytes)` plus `session.renderToRgba(options)` for GUI-style repeated editing
+
+When Adobe DNG SDK support is present, the helper also exposes:
+
+- `supportsDng`
+- `convertDatToDng(datBytes)`
+
+When Adobe support is absent:
+
+- `supportsDng === false`
+- `convertDatToDng(...)` throws instead of silently falling back to the dependency-light DNG writer
 
 The session form is the better fit for editors and library views. It reuses the core library's per-image cache of slider-independent stages, so changing brightness, vividness, or color balance can rerender from a cheaper starting point than reopening the DAT every time.
 
@@ -124,12 +149,16 @@ If a downstream project wants to avoid the JS helper, it can bind against:
 
 The WASM target exports a simple RGBA conversion bridge built on top of that C API:
 
+- `_dj1000_wasm_dng_support_available`
 - `_dj1000_wasm_convert_dat_rgba`
+- `_dj1000_wasm_convert_dat_dng`
 - `_dj1000_wasm_session_open`
 - `_dj1000_wasm_session_render_rgba`
 - `_dj1000_wasm_session_free`
 - `_dj1000_wasm_free_buffer`
 - `_dj1000_wasm_free_string`
+
+The DNG-specific exports are only usable in Adobe-enabled builds.
 
 ## Relationship To DLL Verification
 

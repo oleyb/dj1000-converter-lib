@@ -113,6 +113,15 @@ Build options:
 - `-DDJ1000_BUILD_TESTS=ON|OFF`
 - `-DDJ1000_INSTALL=ON|OFF`
 - `-DDJ1000_BUILD_WASM=ON|OFF`
+- `-DDJ1000_ENABLE_ADOBE_DNG_SDK=ON|OFF`
+- `-DDJ1000_ADOBE_DNG_SDK_ROOT=/absolute/path/to/dng_sdk_1_7_1`
+
+Adobe-backed true RAW DNG features are optional. They are enabled only when:
+
+- `DJ1000_ENABLE_ADOBE_DNG_SDK=ON`
+- `DJ1000_ADOBE_DNG_SDK_ROOT` points at an extracted Adobe DNG SDK tree that contains `dng_sdk/source/dng_negative.h`
+
+Without that SDK checkout, the library still builds normally, but the Adobe-backed `modern-export-dng-sdk` path and the WASM DNG bridge are omitted.
 
 ## Modern Raw Tools
 
@@ -122,14 +131,47 @@ The CLI also exposes modern-only raw inspection and export commands:
 dj1000 modern-dump-raw-stats INPUT.DAT
 dj1000 modern-dump-sensor-frame INPUT.DAT
 dj1000 modern-export-dng INPUT.DAT OUTPUT.dng
+dj1000 modern-export-dng-sdk INPUT.DAT OUTPUT.dng
 dj1000 modern-export-bmp INPUT.DAT OUTPUT.bmp [small|normal|large]
 ```
 
 These commands all stay outside the DLL-faithful path. They are intended for modern decode research, DNG export, and non-legacy rendering experiments without risking regressions in the byte-for-byte verified legacy pipeline.
 
+## Current Modern RAW Baseline
+
+The current recommended true-RAW export path is:
+
+- `dj1000 modern-export-dng-sdk INPUT.DAT OUTPUT.dng`
+
+This command is only available in builds that were configured with Adobe DNG SDK support.
+
+Current status:
+
+- it uses the Adobe DNG SDK writer instead of the earlier dependency-light TIFF/DNG writer
+- it exports the LC9997M as a complementary-color `4`-channel raw with an Adobe-compatible profile
+- the default profile is currently tuned toward Adobe Camera Raw / Photoshop usability rather than historical PhotoRun parity
+- the selected baseline is the `v011` profile tuning, which keeps the modern RAW white-balance controls more usable while restoring some base saturation through the profile layer
+
+Important caveats:
+
+- this path is intentionally not byte-faithful to `DsGraph.dll`
+- Adobe `Temp` / `Tint` still behave more like experimental camera-profile controls than the polished controls from a mature OEM Bayer profile
+- the older `modern-export-dng` command remains useful for inspection and compatibility experiments, but the Adobe SDK path is the preferred route for Photoshop / ACR-facing true RAW work
+
 ## WebAssembly Build
 
 The WASM target is optional and only requires Emscripten when you explicitly enable it.
+
+If you also want browser / Node access to the Adobe-backed true RAW DNG path, configure the same build with Adobe DNG SDK support:
+
+```bash
+emcmake cmake -S . -B build-wasm -G Ninja \
+  -DDJ1000_BUILD_WASM=ON \
+  -DDJ1000_BUILD_CLI=OFF \
+  -DDJ1000_BUILD_TESTS=OFF \
+  -DDJ1000_ENABLE_ADOBE_DNG_SDK=ON \
+  -DDJ1000_ADOBE_DNG_SDK_ROOT=/absolute/path/to/dng_sdk_1_7_1
+```
 
 Example:
 
@@ -148,6 +190,12 @@ Outputs:
 - `build-wasm/native/dj1000_wasm_api.mjs`
 
 The generated module exposes a low-level WASM bridge plus a small JS helper that returns RGBA pixel buffers for browser or Node consumers. The full workflow is documented in [WebAssembly Build](docs/wasm.md).
+
+WASM capability split:
+
+- all WASM builds expose RGBA conversion and session rendering
+- Adobe-enabled WASM builds also expose DNG support through `supportsDng` / `convertDatToDng(...)`
+- non-Adobe WASM builds report `supportsDng === false` and intentionally do not fall back to the dependency-light DNG writer
 
 There is also a tiny static browser consumer at [examples/wasm-browser](examples/wasm-browser) that shows how a separate web app can import the built helper and draw the converted RGBA pixels into a `<canvas>`.
 
