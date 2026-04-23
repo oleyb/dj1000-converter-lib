@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(dj1000 VERSION 0.1.0 LANGUAGES CXX)
+project(dj1000 VERSION 0.1.0 LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -47,6 +47,64 @@ if(
         ${DJ1000_ADOBE_DNG_SDK_SOURCES}
         src/adobe_dng_sdk_jxl_stub.cpp
     )
+    set(DJ1000_LIBJPEG_ROOT "${DJ1000_ADOBE_DNG_SDK_ROOT}/libjpeg")
+    add_library(dj1000_libjpeg STATIC
+        "${DJ1000_LIBJPEG_ROOT}/jcapimin.c"
+        "${DJ1000_LIBJPEG_ROOT}/jcapistd.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdapimin.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdapistd.c"
+        "${DJ1000_LIBJPEG_ROOT}/jcomapi.c"
+        "${DJ1000_LIBJPEG_ROOT}/jcparam.c"
+        "${DJ1000_LIBJPEG_ROOT}/jctrans.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdtrans.c"
+        "${DJ1000_LIBJPEG_ROOT}/jcinit.c"
+        "${DJ1000_LIBJPEG_ROOT}/jcmaster.c"
+        "${DJ1000_LIBJPEG_ROOT}/jcmainct.c"
+        "${DJ1000_LIBJPEG_ROOT}/jcprepct.c"
+        "${DJ1000_LIBJPEG_ROOT}/jccoefct.c"
+        "${DJ1000_LIBJPEG_ROOT}/jccolor.c"
+        "${DJ1000_LIBJPEG_ROOT}/jcsample.c"
+        "${DJ1000_LIBJPEG_ROOT}/jcdctmgr.c"
+        "${DJ1000_LIBJPEG_ROOT}/jfdctint.c"
+        "${DJ1000_LIBJPEG_ROOT}/jfdctfst.c"
+        "${DJ1000_LIBJPEG_ROOT}/jfdctflt.c"
+        "${DJ1000_LIBJPEG_ROOT}/jchuff.c"
+        "${DJ1000_LIBJPEG_ROOT}/jcarith.c"
+        "${DJ1000_LIBJPEG_ROOT}/jcmarker.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdatadst.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdmaster.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdinput.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdmainct.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdcoefct.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdpostct.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdmarker.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdhuff.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdarith.c"
+        "${DJ1000_LIBJPEG_ROOT}/jddctmgr.c"
+        "${DJ1000_LIBJPEG_ROOT}/jidctint.c"
+        "${DJ1000_LIBJPEG_ROOT}/jidctfst.c"
+        "${DJ1000_LIBJPEG_ROOT}/jidctflt.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdsample.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdcolor.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdmerge.c"
+        "${DJ1000_LIBJPEG_ROOT}/jquant1.c"
+        "${DJ1000_LIBJPEG_ROOT}/jquant2.c"
+        "${DJ1000_LIBJPEG_ROOT}/jdatasrc.c"
+        "${DJ1000_LIBJPEG_ROOT}/jaricom.c"
+        "${DJ1000_LIBJPEG_ROOT}/jerror.c"
+        "${DJ1000_LIBJPEG_ROOT}/jmemmgr.c"
+        "${DJ1000_LIBJPEG_ROOT}/jutils.c"
+        "${DJ1000_LIBJPEG_ROOT}/jmemnobs.c"
+    )
+    set_target_properties(dj1000_libjpeg PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+    )
+    target_include_directories(dj1000_libjpeg SYSTEM PRIVATE
+        ${DJ1000_LIBJPEG_ROOT}
+    )
+    target_compile_options(dj1000_libjpeg PRIVATE
+        $<$<C_COMPILER_ID:AppleClang,Clang,GNU>:-w>
+    )
     set_target_properties(dj1000_adobe_dng_sdk PROPERTIES
         POSITION_INDEPENDENT_CODE ON
     )
@@ -54,6 +112,7 @@ if(
         SYSTEM PRIVATE
             ${DJ1000_ADOBE_DNG_SDK_ROOT}/dng_sdk/source
             ${CMAKE_CURRENT_SOURCE_DIR}/third_party/adobe_dng_sdk_stubs
+            ${DJ1000_LIBJPEG_ROOT}
     )
 
     set(DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES)
@@ -74,7 +133,7 @@ if(
     target_compile_definitions(dj1000_adobe_dng_sdk PRIVATE
         ${DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES}
         qDNGUseXMP=0
-        qDNGUseLibJPEG=0
+        qDNGUseLibJPEG=1
         qDNGValidate=0
         qDNGValidateTarget=0
         qDNGThreadSafe=$<IF:$<BOOL:${EMSCRIPTEN}>,0,1>
@@ -87,6 +146,7 @@ if(
             ZLIB::ZLIB
         )
     endif()
+    target_link_libraries(dj1000_adobe_dng_sdk PRIVATE dj1000_libjpeg)
     if(APPLE)
         find_library(DJ1000_COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
         find_library(DJ1000_CARBON_FRAMEWORK Carbon REQUIRED)
@@ -173,7 +233,7 @@ if(DJ1000_HAVE_ADOBE_DNG_SDK)
         DJ1000_HAVE_ADOBE_DNG_SDK=1
         ${DJ1000_ADOBE_DNG_SDK_PLATFORM_DEFINES}
         qDNGUseXMP=0
-        qDNGUseLibJPEG=0
+        qDNGUseLibJPEG=1
         qDNGValidate=0
         qDNGValidateTarget=0
         qDNGThreadSafe=$<IF:$<BOOL:${EMSCRIPTEN}>,0,1>
@@ -467,7 +527,7 @@ endif()
 if(DJ1000_INSTALL)
     if(DJ1000_HAVE_ADOBE_DNG_SDK)
         install(
-            TARGETS dj1000_adobe_dng_sdk
+            TARGETS dj1000_adobe_dng_sdk dj1000_libjpeg
             EXPORT dj1000Targets
             ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
             LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

@@ -2,6 +2,7 @@
 
 #include "dj1000/modern_raw_frame.hpp"
 #include "dj1000/modern_sensor_frame.hpp"
+#include "modern_export_pipeline.hpp"
 
 #include <algorithm>
 #include <array>
@@ -27,6 +28,7 @@
 #include "dng_negative.h"
 #include "dng_orientation.h"
 #include "dng_pixel_buffer.h"
+#include "dng_preview.h"
 #include "dng_simple_image.h"
 #include "dng_tag_values.h"
 #include "dng_temperature.h"
@@ -84,6 +86,10 @@ constexpr double kLc9997AdobeTemperatureBiasKelvin = -240.0;
 constexpr double kLc9997AdobeTintBias = -122.0;
 constexpr float kLc9997ProfileSatRestore = 1.18f;
 constexpr float kLc9997ProfileValueRestore = 1.05f;
+constexpr int kSdkPreviewSourceWidth = 320;
+constexpr int kSdkPreviewSourceHeight = 240;
+constexpr int kSdkPreviewWidth = 128;
+constexpr int kSdkPreviewHeight = 96;
 
 constexpr std::array<std::array<double, 3>, 3> kXyzD50FromLinearSrgb = {{
     {{0.4360747, 0.3850649, 0.1430804}},
@@ -448,6 +454,88 @@ AutoPtr<dng_simple_image> build_stage1_image(dng_host& host, const ModernRawFram
     return AutoPtr<dng_simple_image>(image.Release());
 }
 
+AutoPtr<dng_simple_image> build_sdk_preview_image(dng_host& host, const DatFile& dat) {
+    const RgbBytePlanes planes = build_modern_export_planes(dat, ExportSize::Normal, SliderSettings{});
+    const std::size_t expected_samples =
+        static_cast<std::size_t>(kSdkPreviewSourceWidth) * static_cast<std::size_t>(kSdkPreviewSourceHeight);
+    if (planes.plane0.size() != expected_samples ||
+        planes.plane1.size() != expected_samples ||
+        planes.plane2.size() != expected_samples) {
+        throw std::runtime_error("modern DNG preview render produced unexpected dimensions");
+    }
+
+    const auto sample_resized_plane =
+        [](const std::vector<std::uint8_t>& plane, int row, int col) -> std::uint8_t {
+        const double source_y =
+            (static_cast<double>(row) + 0.5) *
+                static_cast<double>(kSdkPreviewSourceHeight) /
+                static_cast<double>(kSdkPreviewHeight) -
+            0.5;
+        const double source_x =
+            (static_cast<double>(col) + 0.5) *
+                static_cast<double>(kSdkPreviewSourceWidth) /
+                static_cast<double>(kSdkPreviewWidth) -
+            0.5;
+        const int y0 = std::clamp(static_cast<int>(std::floor(source_y)), 0, kSdkPreviewSourceHeight - 1);
+        const int x0 = std::clamp(static_cast<int>(std::floor(source_x)), 0, kSdkPreviewSourceWidth - 1);
+        const int y1 = std::min(y0 + 1, kSdkPreviewSourceHeight - 1);
+        const int x1 = std::min(x0 + 1, kSdkPreviewSourceWidth - 1);
+        const double y_weight = std::clamp(source_y - static_cast<double>(y0), 0.0, 1.0);
+        const double x_weight = std::clamp(source_x - static_cast<double>(x0), 0.0, 1.0);
+        const auto at = [&plane](int source_row, int source_col) -> double {
+            return static_cast<double>(
+                plane[
+                    static_cast<std::size_t>(source_row) *
+                        static_cast<std::size_t>(kSdkPreviewSourceWidth) +
+                    static_cast<std::size_t>(source_col)
+                ]
+            );
+        };
+        const double top = at(y0, x0) * (1.0 - x_weight) + at(y0, x1) * x_weight;
+        const double bottom = at(y1, x0) * (1.0 - x_weight) + at(y1, x1) * x_weight;
+        return static_cast<std::uint8_t>(
+            std::clamp(std::lround(top * (1.0 - y_weight) + bottom * y_weight), 0L, 255L)
+        );
+    };
+
+    AutoPtr<dng_simple_image> image(
+        new dng_simple_image(
+            dng_rect(0, 0, kSdkPreviewHeight, kSdkPreviewWidth),
+            3,
+            ttByte,
+            host.Allocator()
+        )
+    );
+
+    dng_pixel_buffer buffer;
+    image->GetPixelBuffer(buffer);
+    for (int row = 0; row < kSdkPreviewHeight; ++row) {
+        for (int col = 0; col < kSdkPreviewWidth; ++col) {
+            *buffer.DirtyPixel_uint8(row, col, 0) = sample_resized_plane(planes.plane0, row, col);
+            *buffer.DirtyPixel_uint8(row, col, 1) = sample_resized_plane(planes.plane1, row, col);
+            *buffer.DirtyPixel_uint8(row, col, 2) = sample_resized_plane(planes.plane2, row, col);
+        }
+    }
+
+    return AutoPtr<dng_simple_image>(image.Release());
+}
+
+void append_sdk_rendered_preview(
+    dng_host& host,
+    dng_image_writer& writer,
+    const DatFile& dat,
+    dng_preview_list& previews
+) {
+    AutoPtr<dng_simple_image> preview_image = build_sdk_preview_image(host, dat);
+
+    AutoPtr<dng_jpeg_preview> jpeg_preview(new dng_jpeg_preview());
+    jpeg_preview->fInfo.fColorSpace = previewColorSpace_sRGB;
+    writer.EncodeJPEGPreview(host, *preview_image, *jpeg_preview, 82);
+
+    AutoPtr<dng_preview> preview(jpeg_preview.Release());
+    previews.Append(preview);
+}
+
 // Lightroom duplicate detection keys off capture-style metadata, so we stamp
 // conversion time into the generated DNG when the DAT format gives us no real
 // capture clock to preserve.
@@ -623,12 +711,15 @@ std::vector<std::uint8_t> build_modern_dng_sdk_bytes(const DatFile& dat) {
         negative->SynchronizeMetadata();
 
         dng_image_writer writer;
+        dng_preview_list previews;
+        append_sdk_rendered_preview(host, writer, dat, previews);
+
         dng_memory_stream stream(host.Allocator());
         writer.WriteDNG(
             host,
             stream,
             *negative,
-            nullptr,
+            &previews,
             dngVersion_SaveDefault,
             true
         );
