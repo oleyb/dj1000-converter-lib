@@ -5,16 +5,20 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #if DJ1000_HAVE_ADOBE_DNG_SDK
 #include "dng_camera_profile.h"
+#include "dng_exif.h"
 #include "dng_exceptions.h"
 #include "dng_host.h"
 #include "dng_image_writer.h"
@@ -444,6 +448,29 @@ AutoPtr<dng_simple_image> build_stage1_image(dng_host& host, const ModernRawFram
     return AutoPtr<dng_simple_image>(image.Release());
 }
 
+// Lightroom duplicate detection keys off capture-style metadata, so we stamp
+// conversion time into the generated DNG when the DAT format gives us no real
+// capture clock to preserve.
+dng_date_time_info make_conversion_timestamp_info() {
+    dng_date_time_info info;
+    CurrentDateTimeAndZone(info);
+
+    const auto now = std::chrono::system_clock::now();
+    const auto subseconds = std::chrono::duration_cast<std::chrono::microseconds>(
+        now.time_since_epoch()
+    ) % std::chrono::seconds(1);
+
+    if (subseconds.count() > 0) {
+        std::ostringstream encoded;
+        encoded << std::setw(6) << std::setfill('0') << subseconds.count();
+        dng_string value;
+        value.Set(encoded.str().c_str());
+        info.SetSubseconds(value);
+    }
+
+    return info;
+}
+
 AutoPtr<dng_negative> build_sdk_negative(
     dng_host& host,
     const ModernRawFrame& raw_frame,
@@ -529,6 +556,13 @@ AutoPtr<dng_negative> build_sdk_negative(
 
     AutoPtr<dng_image> stage1_image(build_stage1_image(host, raw_frame).Release());
     negative->SetStage1Image(stage1_image);
+
+    AutoPtr<dng_exif> exif(host.Make_dng_exif());
+    const dng_date_time_info conversion_timestamp = make_conversion_timestamp_info();
+    exif->fDateTimeOriginal = conversion_timestamp;
+    exif->fDateTimeDigitized = conversion_timestamp;
+    exif->fDateTime = conversion_timestamp;
+    negative->ResetExif(exif.Release());
 
     AutoPtr<dng_camera_profile> profile(new dng_camera_profile());
     profile->SetName("DJ1000 Complementary RAW");
