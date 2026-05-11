@@ -1,0 +1,264 @@
+# Mitsubishi DJ-1000 / UMAX PhotoRun Converter
+
+Native reverse-engineered converter for the UMAX PhotoRun / Mitsubishi DJ-1000 `.DAT` image format.
+
+This repository is intended to be the source of truth for:
+
+- the standalone converter CLI
+- the reusable native library that other applications depend on
+- the reverse-engineering notes and historical documentation
+- the verification tooling that compares native behavior against the original Windows DLL
+
+It is not intended to contain the final desktop GUI apps. Those should live in separate repositories and consume this project as a dependency.
+
+## Goals
+
+- Preserve faithful conversion behavior, including the original software's quirks.
+- Provide a clean native library API for other projects.
+- Provide a standalone CLI for scripting, batch conversion, and debugging.
+- Keep the reverse-engineering process transparent and well documented.
+- Preserve the ability to verify native changes against the original `DsGraph.dll`.
+
+## Recommended Repo Boundaries
+
+Keep this repository as the converter core.
+
+What belongs here:
+
+- C++ library code in [`native/include`](native/include) and [`native/src`](native/src)
+- the CLI in [`native/src/main.cpp`](native/src/main.cpp)
+- native tests
+- DLL-verification tools in [`tools`](tools)
+- reverse-engineering and contributor documentation in [`docs`](docs)
+
+What should be separate repositories:
+
+- macOS desktop app
+- Windows desktop app
+- browser/web UI
+
+Those projects should depend on this repository's library package rather than duplicating converter logic.
+
+## WASM Recommendation
+
+The WebAssembly build target should live in this repository.
+
+Reasoning:
+
+- it is the same converter core, not a different product
+- parity tests belong next to the implementation they verify
+- bugs fixed in native code should immediately benefit native and WASM builds
+- it avoids a second repo drifting from the core algorithm
+
+What should stay separate is the browser application itself. A future web app repo can depend on a WASM package built from this project.
+
+## Public Library Surface
+
+The intended downstream entry points are:
+
+- [`native/include/dj1000/converter.hpp`](native/include/dj1000/converter.hpp) for C++ consumers
+- [`native/include/dj1000/c_api.h`](native/include/dj1000/c_api.h) for C, FFI, and WASM-facing consumers
+
+The C++ surface exposes:
+
+- `dj1000::ConvertOptions`
+- `dj1000::ConvertDebugState`
+- `dj1000::ConvertedImage`
+- `dj1000::Session`
+- `dj1000::convert_dat_bytes_to_bgr(...)`
+- `dj1000::convert_dat_to_bgr(...)`
+- `dj1000::write_bmp(...)`
+
+`dj1000::Session` is intended for editor-style consumers. It keeps the parsed DAT open and caches slider-independent intermediate stages per image, so repeated renders with different edit settings do less work than one-shot conversion.
+
+`dj1000::ConvertOptions` now supports two conversion pipelines:
+
+- `dj1000::ConversionPipeline::Legacy`
+  keeps the original PhotoRun / `DsGraph.dll` behavior as closely as possible and remains the default
+- `dj1000::ConversionPipeline::Modern`
+  uses a modern-only calibrated sensor-frame, demosaic, denoise, white-balance, tone-mapping, resize, and DNG-export path that is intentionally not DLL-faithful
+
+That split lets downstream apps choose between historical fidelity and a cleaner modern rendering path without forking the core library.
+
+The C surface exposes:
+
+- `dj1000_convert_options`
+- `dj1000_image`
+- `dj1000_convert_dat(...)`
+- `dj1000_session_open(...)`
+- `dj1000_session_render(...)`
+- `dj1000_session_free(...)`
+- `dj1000_image_free(...)`
+
+That keeps downstream apps away from the internal pipeline stages.
+
+The C API mirrors the same pipeline choice through `dj1000_convert_options.pipeline`, with:
+
+- `DJ1000_PIPELINE_LEGACY`
+- `DJ1000_PIPELINE_MODERN`
+
+## Build
+
+Configure from the repo root:
+
+```bash
+cmake -S . -B build -G Ninja
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+Build options:
+
+- `-DDJ1000_BUILD_CLI=ON|OFF`
+- `-DDJ1000_BUILD_TESTS=ON|OFF`
+- `-DDJ1000_INSTALL=ON|OFF`
+- `-DDJ1000_BUILD_WASM=ON|OFF`
+- `-DDJ1000_ENABLE_ADOBE_DNG_SDK=ON|OFF`
+- `-DDJ1000_ADOBE_DNG_SDK_ROOT=/absolute/path/to/dng_sdk_1_7_1`
+
+Adobe-backed true RAW DNG features are optional. They are enabled only when:
+
+- `DJ1000_ENABLE_ADOBE_DNG_SDK=ON`
+- `DJ1000_ADOBE_DNG_SDK_ROOT` points at an extracted Adobe DNG SDK tree that contains `dng_sdk/source/dng_negative.h`
+
+Without that SDK checkout, the library still builds normally, but the Adobe-backed `modern-export-dng-sdk` path and the WASM DNG bridge are omitted.
+
+## Modern Raw Tools
+
+The CLI also exposes modern-only raw inspection and export commands:
+
+```bash
+dj1000 modern-dump-raw-stats INPUT.DAT
+dj1000 modern-dump-sensor-frame INPUT.DAT
+dj1000 modern-export-dng INPUT.DAT OUTPUT.dng
+dj1000 modern-export-dng-sdk INPUT.DAT OUTPUT.dng
+dj1000 modern-export-bmp INPUT.DAT OUTPUT.bmp [small|normal|large]
+```
+
+These commands all stay outside the DLL-faithful path. They are intended for modern decode research, DNG export, and non-legacy rendering experiments without risking regressions in the byte-for-byte verified legacy pipeline.
+
+## Current Modern RAW Baseline
+
+The current recommended true-RAW export path is:
+
+- `dj1000 modern-export-dng-sdk INPUT.DAT OUTPUT.dng`
+
+This command is only available in builds that were configured with Adobe DNG SDK support.
+
+Current status:
+
+- it uses the Adobe DNG SDK writer instead of the earlier dependency-light TIFF/DNG writer
+- it exports the LC9997M as a complementary-color `4`-channel raw with an Adobe-compatible profile
+- the default profile is currently tuned toward Adobe Camera Raw / Photoshop usability rather than historical PhotoRun parity
+- the selected baseline is the `v011` profile tuning, which keeps the modern RAW white-balance controls more usable while restoring some base saturation through the profile layer
+
+Important caveats:
+
+- this path is intentionally not byte-faithful to `DsGraph.dll`
+- Adobe `Temp` / `Tint` still behave more like experimental camera-profile controls than the polished controls from a mature OEM Bayer profile
+- the older `modern-export-dng` command remains useful for inspection and compatibility experiments, but the Adobe SDK path is the preferred route for Photoshop / ACR-facing true RAW work
+
+## WebAssembly Build
+
+The WASM target is optional and only requires Emscripten when you explicitly enable it.
+
+If you also want browser / Node access to the Adobe-backed true RAW DNG path, configure the same build with Adobe DNG SDK support:
+
+```bash
+emcmake cmake -S . -B build-wasm -G Ninja \
+  -DDJ1000_BUILD_WASM=ON \
+  -DDJ1000_BUILD_CLI=OFF \
+  -DDJ1000_BUILD_TESTS=OFF \
+  -DDJ1000_ENABLE_ADOBE_DNG_SDK=ON \
+  -DDJ1000_ADOBE_DNG_SDK_ROOT=/absolute/path/to/dng_sdk_1_7_1
+```
+
+Example:
+
+```bash
+emcmake cmake -S . -B build-wasm -G Ninja \
+  -DDJ1000_BUILD_WASM=ON \
+  -DDJ1000_BUILD_CLI=OFF \
+  -DDJ1000_BUILD_TESTS=OFF
+cmake --build build-wasm --target dj1000_wasm
+```
+
+Outputs:
+
+- `build-wasm/native/dj1000_wasm.mjs`
+- `build-wasm/native/dj1000_wasm.wasm`
+- `build-wasm/native/dj1000_wasm_api.mjs`
+
+The generated module exposes a low-level WASM bridge plus a small JS helper that returns RGBA pixel buffers for browser or Node consumers. The full workflow is documented in [WebAssembly Build](docs/wasm.md).
+
+WASM capability split:
+
+- all WASM builds expose RGBA conversion and session rendering
+- Adobe-enabled WASM builds also expose DNG support through `supportsDng` / `convertDatToDng(...)`
+- non-Adobe WASM builds report `supportsDng === false` and intentionally do not fall back to the dependency-light DNG writer
+
+There is also a tiny static browser consumer at [examples/wasm-browser](examples/wasm-browser) that shows how a separate web app can import the built helper and draw the converted RGBA pixels into a `<canvas>`.
+
+## Install / Consume As A Dependency
+
+The native CMake project now exports an installable package:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_INSTALL_PREFIX=/tmp/dj1000-install
+cmake --build build
+cmake --install build
+```
+
+Downstream CMake projects can then use:
+
+```cmake
+find_package(dj1000 CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE dj1000::dj1000)
+```
+
+## Verification Against The Original DLL
+
+This repo deliberately keeps the verification workflow, but it does not need to redistribute proprietary runtime files.
+
+Verification tooling lives in [`tools`](tools), including:
+
+- [`verify_native_reference_corpus.py`](tools/verify_native_reference_corpus.py)
+- [`trace_default_large_export_sample.py`](tools/trace_default_large_export_sample.py)
+- [`trace_default_normal_export_sample.py`](tools/trace_default_normal_export_sample.py)
+- [`Dj1000DllHarness.cs`](tools/Dj1000DllHarness.cs)
+
+Contributors who want DLL-backed verification should provide their own local copy of the original DLL and a working Wine environment. The step-by-step workflow is documented in [DLL Verification](docs/dll-verification.md) and summarized in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+The reference-corpus verifier expects a local dataset path:
+
+```bash
+python3 tools/verify_native_reference_corpus.py --dataset-root /path/to/MDSC
+```
+
+## Documentation
+
+- [Repo Architecture](docs/repo-architecture.md)
+- [Development Setup](docs/development.md)
+- [WebAssembly Build](docs/wasm.md)
+- [DLL Verification](docs/dll-verification.md)
+- [Modern Raw Roadmap](docs/modern-raw-roadmap.md)
+- [Reverse Engineering Notes](docs/reverse-engineering.md)
+- [Native Rewrite Plan](docs/native-rewrite-plan.md)
+
+## Current Verification Status
+
+The native converter currently matches the local MDSC reference corpus exactly:
+
+- `14 / 14` known BMP references pass
+- this includes the known edited exports, not just untouched defaults
+
+## License
+
+This repository is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+
+## Before Publishing Publicly
+
+There are still a few repo-level decisions worth making explicitly:
+
+- decide whether to publish any sample fixtures, and which ones are safe to redistribute
+- decide which sample assets, if any, are safe to include directly in the public repo

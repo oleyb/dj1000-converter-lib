@@ -1,0 +1,5 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/dj1000Targets.cmake")
+
+check_required_components(dj1000)

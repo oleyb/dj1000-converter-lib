@@ -1,0 +1,807 @@
+# UMAX PhotoRun / Mitsubishi DJ-1000 Reverse Engineering Notes
+
+## What we extracted
+
+- `PHOTO/_SETUP.1` is an InstallShield v3 "Z" archive.
+- The original archive contains three payload files:
+  - `Group1/PhotoRun.exe`
+  - `Group1/DsGraph.dll`
+  - `Group1/PHOTORUN.HLP`
+- After cleanup, the local runtime keeps only `Group1/DsGraph.dll`, because the current macOS toolchain no longer needs the EXE, help file, or original installer media to run.
+- A local extractor for this archive format lives in [`tools/isv3_extract.cpp`](../tools/isv3_extract.cpp).
+
+## Confirmed binary entry points
+
+- `PhotoRun.exe` imports exactly two symbols from `DSGRAPH.dll`:
+  - `DJ1000GraphicConv`
+  - `TransToIndexView`
+- `DsGraph.dll` exports:
+  - ordinal 1: `DJ1000GraphicConv` at RVA `0x50a0`
+  - ordinal 2: `TransToIndexView` at RVA `0x5150`
+
+## Confirmed `.dat` layout
+
+- Expected file size: `0x20000` bytes.
+- The loader reads:
+  - `0x1f600` bytes of image payload into an internal buffer.
+  - `13` bytes of trailer metadata at offset `0x1f600`.
+- The EXE rejects files whose trailer signature bytes do not match:
+  - `c4 b2 e3 22`
+- `PhotoRun.exe` also uses trailer bytes:
+  - byte 8 as a mode / non-zero validity flag
+  - bytes 10 and 11 combined as `byte11 + 10 * byte10`
+
+## Converter behavior seen in the DLL
+
+- `DJ1000GraphicConv` prepares a 24-bit BMP-style header and delegates into an internal routine at `0x10005290`.
+- Output dimensions are chosen here:
+  - preview / index path: `0x50 x 0x3c` (`80 x 60`)
+  - normal path: `0x140 x 0xf0` (`320 x 240`)
+  - alternate mode when metadata field `== 5`: `0x1f8 x 0x17a` (`504 x 378`)
+- `TransToIndexView` is a separate preprocessing routine used by the EXE before some preview/index operations.
+
+## Useful size clues from the DLL
+
+- The main conversion helper allocates `0x2f400` byte buffers.
+- `0x2f400 == 504 * 384`, which strongly suggests the original code builds one or more scaled intermediate planes around the camera's high-resolution mode before producing the final BMP.
+- `TransToIndexView` allocates `0x2000` bytes and performs a deterministic byte-reordering step before zeroing and copying into the destination buffer.
+
+## Reference corpus from the original software
+
+- Sample pairs now live in a local MDSC reference dataset folder.
+- Valid `.dat` files in that folder are all exactly `0x20000` bytes.
+- `MDSC0003.DAT` and `MDSC0012.DAT` are zero-byte placeholders.
+- The large reference BMP exports are all `504 x 378`, 24-bit.
+- The small reference BMP exports with an `s` suffix are `320 x 240`, 24-bit.
+- The folder also contains JPEGs, but the BMPs are the ground-truth targets for faithful matching.
+
+## Confirmed pipeline shape inside `DsGraph.dll`
+
+- `DJ1000GraphicConv` chooses output dimensions, then calls the main helper at `0x10005290`.
+- That helper allocates:
+  - three `504 x 384` byte planes
+  - several `504 x 384` float planes
+  - later, larger `0x17a000` working buffers used by the downstream color/tone stages
+- The call sequence in the main helper includes these internal stages:
+  - `0x10005eb0`
+  - `0x10001e00`
+  - byte quantization from float planes back into three `504 x 384` byte planes
+  - `0x100013c0`
+  - `0x10002410`
+  - `0x100021a0`
+  - `0x10004810`
+  - `0x10003600`
+  - `0x10002730`
+  - `0x10002a00`
+  - `0x10002c40`
+  - `0x10002dd0`
+  - `0x10003890`
+  - `0x10003060`
+  - `0x10004450`
+  - `0x10002530`
+- The current native rewrite now reaches the real default `320 x 240` export path end to end.
+- Fresh DLL-backed default-oracle exports now match the native path exactly with the current call-site lift:
+  - `MDSC0001.DAT -> original_0001m_fresh.bmp`
+  - `MDSC0008.DAT -> original_0008m_fresh.bmp`
+  - `MDSC0009.DAT -> original_0009m_fresh.bmp`
+- The working normal-export call-site values for those exact matches are:
+  - final crop top row: `3`
+  - `0x10003060` param0: `16`
+  - `0x10003060` param1: `40`
+  - `0x10003060` scalar: `30`
+  - `0x10003060` threshold: `20`
+- The plain native `normal-export-bmp` command now uses those exact default call-site values, not just the tuned override path.
+- The biggest upstream fixes that enabled the exact match were:
+  - decoding `0x10001cc0` more faithfully: the source-gain average is integer-divided before the gain ratio is formed, not computed as a full floating average
+  - lifting `0x10004810` more literally, including the flat-buffer overlap behavior in its horizontal and vertical repair passes
+- The corrected tracing tool at [`trace_default_normal_export_sample.py`](../tools/trace_default_normal_export_sample.py) now uses that integer-average source-gain behavior too, so its internal stage traces line up with the current native path.
+- `0x100013c0` is a geometry stage, not the initial raw decoder:
+  - it receives the three already-processed byte planes
+  - it uses different crop/scale tables for preview, normal, and `504 x 378` export modes
+  - in the high-resolution path it copies out exactly `504 x 378`
+
+## Newly probed upstream source stage: `0x10005eb0`
+
+- The stage immediately before `0x10001e00` is now callable directly from the harness, so we can feed synthetic raw row data into the original DLL and inspect its float-plane output without going through the whole converter.
+- The direct call boundary is now clear:
+  - arg `1`: preview / non-preview mode flag
+  - arg `2`: first output float plane
+  - arg `3`: second output float plane
+  - arg `4`: third output float plane
+  - arg `5`: raw source bytes
+- The raw source layout used by this stage is:
+  - normal: `512 x 244` bytes
+  - preview: `128 x 64` bytes
+- The output layout that feeds `0x10001e00` is:
+  - normal: `512 x 246` float samples
+  - preview: `128 x 64` float samples
+- A new direct probe now lives at [`probe_source_stage.py`](../tools/probe_source_stage.py).
+- Direct synthetic probes already show meaningful structure:
+  - row-coded input lands almost entirely in the middle output plane
+  - a single raw impulse spreads only horizontally, with weights `0.25 / 0.5 / 0.25`
+  - the middle plane always receives that impulse response
+  - even-even source samples also light up plane `0`
+  - odd-odd source samples also light up plane `2`
+  - even-odd and odd-even source samples do not light up planes `0` or `2` in the tested cases
+- That strongly suggests `0x10005eb0` is doing an early mosaic-aware split before the later normalization stage:
+  - plane `1` behaves like the shared green / luma-like channel
+  - planes `0` and `2` behave like parity-specific companion channels, consistent with red / blue sites
+- The tested preview impulse path matches the same basic pattern as the normal path.
+- The DLL constants around this stage are now decoded from `.rdata`:
+  - `0x100172b0 == 250.0f`
+  - `0x100172b8 == 0.0`
+  - `0x100172c8 == 2.0`
+  - `0x100172d0 == -2.0`
+  - `0x100172e0 == 255.0`
+  - `0x100172e8 == 0.5`
+  - `0x100172f0 == 3.0`
+  - `0x100172f8 == 160.0`
+- Those constants line up with the disassembly:
+  - the early neighborhood builder only counts nearby float samples that stay below `250.0`
+  - several branches clamp through the usual `0.0 .. 255.0` window
+  - later passes compare local differences against `+/-2.0`
+  - one later row-local gate uses the pair `3.0` and `160.0`
+- The expanded synthetic probes in [`probe_source_stage.py`](../tools/probe_source_stage.py) now show:
+  - a pure vertical step leaves the side planes at zero and only changes the middle plane
+  - a checkerboard collapses to a flat middle-plane response with the side planes still zero
+  - a horizontal step at an even split column wakes plane `0`
+  - the same step shifted by one column wakes plane `2`
+  - that horizontal-step parity behavior is the same on every tested row, so the final side-plane selection is tied to column parity rather than row parity
+- A dedicated horizontal-step sweep now lives at [`sweep_source_stage_hsteps.py`](../tools/sweep_source_stage_hsteps.py).
+- That sweep confirms the downstream split is stable across multiple tested edge positions and in both modes:
+  - tested split columns `20`, `21`, `60`, and `61`
+  - tested in both normal and preview mode
+  - even split columns always send the side response into plane `0`
+  - odd split columns always send the side response into plane `2`
+  - the side response shape is fixed at the tested `64 -> 192` edge:
+    - leading sample `6.4`
+    - edge sample `13.7142857`
+  - the middle plane sharpens the same edge to:
+    - `70.4` on the low side
+    - `178.285714` on the high side
+- Additional isolated rising/falling reruns now show the side-plane choice depends on both column parity and edge direction:
+  - rising `64 -> 192`:
+    - even split column -> plane `0`
+    - odd split column -> plane `2`
+  - falling `192 -> 64`:
+    - even split column -> plane `2`
+    - odd split column -> plane `0`
+  - so the downstream gate is sign-sensitive as well as parity-sensitive
+- Additional value sweeps also show that the downstream edge correction is nonlinear in edge size / baseline:
+  - `0 -> 128` gives side correction `16.0` on only the edge sample
+  - `64 -> 128` gives side correction `4.0, 6.4`
+  - `100 -> 200` gives side correction `6.25, 10.0`
+  - `0 -> 255` gives side correction `63.75, 63.75`
+  - that rules out a simple fixed-gain linear edge kernel for the downstream row-local stage
+- A later vertical pass inside `0x10005eb0` is now decoded more cleanly from the DLL around `0x10006b38`:
+  - it keeps two constants live across the pass: `3.0` and `160.0`
+  - the pass works on the middle float plane only
+  - for each active sample it computes the vertical average of the rows above and below:
+    - `vertical_avg = 0.5 * (top + bottom)`
+  - it replaces the current sample with that vertical average only when:
+    - `current > 160.0`
+    - `vertical_avg - current > 3.0`
+  - otherwise it keeps the current sample
+  - the result is then clamped to `0..255`
+- DLL-backed probes match that decode:
+  - a flat `200` frame stays flat at `200`
+  - a vertical step `200 -> 255` lifts the last `200` row to `227.5`
+  - a vertical step `100 -> 255` does not lift the last `100` row, because the `160.0` brightness gate blocks it
+- That lifted native vertical helper now lives in:
+  - [`bright_vertical_gate.cpp`](../native/src/bright_vertical_gate.cpp)
+  - [`bright_vertical_gate.hpp`](../native/include/dj1000/bright_vertical_gate.hpp)
+  - [`verify_native_bright_vertical_gate.py`](../tools/verify_native_bright_vertical_gate.py)
+- The upstream center-plane path of `0x10005eb0` is now native and DLL-verified too:
+  - the row-local loop writes four interleaved raw / adjusted arrays
+  - on even rows it averages the pair built from the `0x84` / `0x7c` locals
+  - on odd rows it averages the pair built from the `0x78` / `0x80` locals
+  - the horizontal adjusted sample is:
+    - fallback: `0.5 * (left + right)` when `abs(left - right) <= 2` or the gated neighbor counts are incomplete
+    - edge path: `current * avg_near / avg_far` where:
+      - `avg_near` uses the immediate left/right samples that stay below `250`
+      - `avg_far` uses `current` plus the `-2 / +2` samples that stay below `250`
+  - horizontal boundary handling is reflection without repeating the edge sample:
+    - `-1 -> 1`, `-2 -> 2`
+    - `width -> width - 2`, `width + 1 -> width - 3`
+  - the vertical bright gate then runs on that center plane with reflected top/bottom neighbors in the same style
+- That full native center-plane slice now lives in:
+  - [`source_center_stage.cpp`](../native/src/source_center_stage.cpp)
+  - [`source_center_stage.hpp`](../native/include/dj1000/source_center_stage.hpp)
+  - [`verify_native_source_center_stage.py`](../tools/verify_native_source_center_stage.py)
+- The DLL-backed verifier now matches the original center-plane output on 16 synthetic cases total:
+  - both normal and preview mode
+  - `flat-200`
+  - `flat-255`
+  - `rowcode`
+  - `checker-64-192`
+  - `hstep-64-192`
+  - `hstep-192-64`
+  - `vstep-200-255`
+  - `vstep-100-255`
+- The full native source stage is now DLL-verified end to end for the export-critical normal path too:
+  - [`source_stage.cpp`](../native/src/source_stage.cpp)
+  - [`source_stage.hpp`](../native/include/dj1000/source_stage.hpp)
+  - [`verify_native_source_stage.py`](../tools/verify_native_source_stage.py)
+  - normal mode now matches the original DLL on:
+    - `impulse`
+    - `rowcode`
+    - `gradient`
+    - `checker-64-192`
+    - `hstep-64-192`
+    - `hstep-192-64`
+    - `vstep-200-255`
+    - `vstep-100-255`
+  - the last rounding fix was keeping the vertical interpolation ratio in higher precision before the final writeback
+  - preview mode still has a small last-row quirk in the `128 x 64` path, so the default verifier now focuses on the normal/export branch while that preview-only edge case stays isolated
+- The first native slice of this stage is now in:
+  - [`source_seed_stage.cpp`](../native/src/source_seed_stage.cpp)
+  - [`source_seed_stage.hpp`](../native/include/dj1000/source_seed_stage.hpp)
+- What that native slice covers exactly today:
+  - plane `1` reproduces the currently isolated horizontal impulse seed
+  - plane `0` reproduces the even-even impulse seed
+  - plane `2` reproduces the odd-odd impulse seed
+  - the current native verifier checks those impulse cases directly against the original DLL in:
+    - [`verify_native_source_seed_stage.py`](../tools/verify_native_source_seed_stage.py)
+- What it does not claim yet:
+  - row-coded input still proves that later cancellation or neighborhood mixing inside `0x10005eb0` suppresses the side planes on smooth rows
+  - the saved gradient probes still show extra vertical/context behavior that is not yet native
+  - the horizontal-step parity split that lands in final planes `0` and `2` is downstream of the current native seed helper
+  - the fixed `6.4 / 13.7142857` edge-correction shape is also downstream of the current native seed helper
+  - the sign-sensitive plane swap for rising vs falling edges is also downstream of the current native seed helper
+
+## Newly lifted native pre-geometry normalization stage: `0x10001e00`
+
+- The float-plane normalization step immediately before byte quantization is now reimplemented natively in:
+  - [`pregeometry_normalize.cpp`](../native/src/pregeometry_normalize.cpp)
+  - [`pregeometry_normalize.hpp`](../native/include/dj1000/pregeometry_normalize.hpp)
+- Direct DLL-backed probing shows this helper takes:
+  - a preview / non-preview mode flag
+  - three float planes laid out as:
+    - normal: `512 x 246`
+    - preview: `128 x 64`
+- The helper does not treat the full `0..255` range as valid reference data while computing channel averages.
+- The middle float plane is the reference plane, and only samples in the `20..127` window participate in the average-gain calculation:
+  - lower bound from `0x10017028 == 20.0f`
+  - upper bound from `0x1001702c == 127.0f`
+- Real source-stage output now shows those bounds are open, not closed:
+  - the effective DLL rule is `20.0 < plane1 < 127.0`
+  - using inclusive bounds was close enough for the earlier synthetic unit cases but too loose for the full gradient corpus
+- With those filtered averages:
+  - plane `0` is scaled toward the middle-plane average
+  - plane `1` is the reference and is left unscaled
+  - plane `2` is scaled toward the middle-plane average
+- If the filtered averages collapse to zero, the helper returns early and leaves the float planes untouched.
+- When it does run the writeback loop, it clamps outputs with a `255.0f` ceiling while preserving the DLL's bit-pattern rule that keeps `-0.0f` but zeroes other negative values.
+- The C# harness can now call the original helper directly with:
+  - `Dj1000DllHarness.exe --dll PATH --output PREFIX --dump-normalize-stage --plane0 P0 --plane1 P1 --plane2 P2`
+- The small helper at `0x10007b68` used in the quantization loop is now decoded too:
+  - it temporarily switches the x87 rounding mode to "truncate toward zero"
+  - it converts the current `st(0)` value to an integer
+  - the main helper then writes the low byte of that integer into the geometry-input planes
+- The native truncation/packing slice now lives in:
+  - [`quantize_stage.cpp`](../native/src/quantize_stage.cpp)
+  - [`quantize_stage.hpp`](../native/include/dj1000/quantize_stage.hpp)
+- With that quantization stage in place, the composed normal/export middle block is now DLL-verified end to end:
+  - raw source rows -> `0x10005eb0` equivalent
+  - `0x10001e00` equivalent
+  - float-to-byte truncation
+  - non-large geometry (`0x100016a0` + copy-out)
+  - the new native composition lives in:
+    - [`nonlarge_source_pipeline.cpp`](../native/src/nonlarge_source_pipeline.cpp)
+    - [`nonlarge_source_pipeline.hpp`](../native/include/dj1000/nonlarge_source_pipeline.hpp)
+    - [`verify_native_nonlarge_source_pipeline.py`](../tools/verify_native_nonlarge_source_pipeline.py)
+  - the DLL-backed verifier now matches all 8 normal/export synthetic cases:
+    - `impulse`
+    - `rowcode`
+    - `gradient`
+    - `checker-64-192`
+    - `hstep-64-192`
+    - `hstep-192-64`
+    - `vstep-200-255`
+    - `vstep-100-255`
+- The preview branch is closer but still not exact in this composed path:
+  - `preview.impulse` now matches
+  - `preview.rowcode` only misses two quantized bytes at the start of the last row in plane `0`
+  - `preview.gradient` and `preview.hstep` still show a few larger last-row/context mismatches in plane `0`
+  - those preview mismatches all trace back to the already-isolated preview-only source-stage tail behavior rather than the newly added normal/export quantization or geometry code
+- The first post-geometry double-plane split is now decoded and native:
+  - `0x10002410` takes the three byte planes emitted by geometry and expands them into three `double` planes:
+    - `center = plane1`
+    - `delta0 = plane0 - plane1`
+    - `delta2 = plane2 - plane1`
+  - the native lift now lives in:
+    - [`post_geometry_prepare.cpp`](../native/src/post_geometry_prepare.cpp)
+    - [`post_geometry_prepare.hpp`](../native/include/dj1000/post_geometry_prepare.hpp)
+    - [`test_post_geometry_prepare.cpp`](../native/tests/test_post_geometry_prepare.cpp)
+    - [`verify_native_post_geometry_prepare.py`](../tools/verify_native_post_geometry_prepare.py)
+  - DLL-backed parity is green on synthetic `rowcode`, `gradient`, and `impulse` stage-plane cases
+- The next downstream row-local repair helper is now native too:
+  - `0x100021a0` filters the two side delta planes in place, one row at a time
+  - it reflects each row with non-repeating edge ghosts, then applies:
+    - if `left - right >= 5.0` and `left >= 160.0`, write `right`
+    - else if `left - right <= -5.0` and `right >= 160.0`, write `left`
+    - else keep `current`
+  - the native lift now lives in:
+    - [`post_geometry_filter.cpp`](../native/src/post_geometry_filter.cpp)
+    - [`post_geometry_filter.hpp`](../native/include/dj1000/post_geometry_filter.hpp)
+    - [`test_post_geometry_filter.cpp`](../native/tests/test_post_geometry_filter.cpp)
+    - [`verify_native_post_geometry_filter.py`](../tools/verify_native_post_geometry_filter.py)
+  - DLL-backed parity is green on synthetic `left-bright`, `alternating`, and `ramp` delta-plane cases
+- The export-critical non-large path is now verified one full block farther downstream:
+  - raw source rows -> `0x10005eb0` equivalent
+  - `0x10001e00` equivalent
+  - float-to-byte truncation
+  - non-large geometry (`0x100016a0` + copy-out)
+  - `0x10002410` post-geometry double-plane prepare
+  - `0x100021a0` post-geometry delta filtering
+  - the new native composition lives in:
+    - [`nonlarge_post_geometry_pipeline.cpp`](../native/src/nonlarge_post_geometry_pipeline.cpp)
+    - [`nonlarge_post_geometry_pipeline.hpp`](../native/include/dj1000/nonlarge_post_geometry_pipeline.hpp)
+    - [`verify_native_nonlarge_post_geometry_pipeline.py`](../tools/verify_native_nonlarge_post_geometry_pipeline.py)
+  - DLL-backed parity is green for all 8 normal/export synthetic cases:
+    - `impulse`
+    - `rowcode`
+    - `gradient`
+    - `checker-64-192`
+    - `hstep-64-192`
+    - `hstep-192-64`
+    - `vstep-200-255`
+    - `vstep-100-255`
+- The next downstream per-pixel double-plane stage is now decoded and native too:
+  - `0x10002c40` operates on three in-place `double` planes:
+    - plane `1` is the center plane that drives the gain curve
+    - planes `0` and `2` are side planes scaled by that center-driven factor
+  - the DLL behavior is:
+    - if `center > 127`, scale side planes by `max(0, 1 - (center - 127) / 23)`
+    - else if `center < 20`, scale side planes by `1 - (20 - center) * 0.1`
+    - else leave the side planes unchanged
+    - the center plane itself is truncated to an integer and only the low byte is kept
+      - for example, `300` becomes `44`, not `255`
+  - the native lift now lives in:
+    - [`post_geometry_center_scale.cpp`](../native/src/post_geometry_center_scale.cpp)
+    - [`post_geometry_center_scale.hpp`](../native/include/dj1000/post_geometry_center_scale.hpp)
+    - [`test_post_geometry_center_scale.cpp`](../native/tests/test_post_geometry_center_scale.cpp)
+    - [`verify_native_post_geometry_center_scale.py`](../tools/verify_native_post_geometry_center_scale.py)
+  - DLL-backed parity is green on synthetic `clamp-and-invert` and `ramp` cases
+- Native verification is now covered by:
+  - [`test_pregeometry_normalize.cpp`](../native/tests/test_pregeometry_normalize.cpp)
+  - [`verify_native_pregeometry_normalize.py`](../tools/verify_native_pregeometry_normalize.py)
+- Current DLL-backed parity is green for:
+  - normal + balanced / masked / zero-fallback / clamp patterns
+  - preview + balanced / masked / zero-fallback / clamp patterns
+- The native combined `source -> normalize` block now exists too:
+  - [`pregeometry_pipeline.cpp`](../native/src/pregeometry_pipeline.cpp)
+  - [`pregeometry_pipeline.hpp`](../native/include/dj1000/pregeometry_pipeline.hpp)
+  - [`test_pregeometry_pipeline.cpp`](../native/tests/test_pregeometry_pipeline.cpp)
+  - [`verify_native_pregeometry_pipeline.py`](../tools/verify_native_pregeometry_pipeline.py)
+- That combined native pre-geometry pipeline is now DLL-verified on the normal/export path for:
+  - `impulse`
+  - `rowcode`
+  - `gradient`
+  - `checker-64-192`
+  - `hstep-64-192`
+  - `hstep-192-64`
+  - `vstep-200-255`
+  - `vstep-100-255`
+
+## Newly lifted native helper: `0x10001210`
+
+- The internal helper at `0x10001210` is now reimplemented natively in [`resample_lut.cpp`](../native/src/resample_lut.cpp).
+- It generates the packed horizontal lookup table used by the geometry stage's downstream row processor.
+- It splits into two internal builders:
+  - `0x10001290` for width parameters `<= 0x190`
+  - `0x10001340` for width parameters `> 0x190`
+- Confirmed behavior:
+  - narrow-width mode emits a `400`-byte packed table
+  - wide-width mode emits an `800`-byte packed table
+  - the packed-byte postpass is controlled by `0x1001a0e4`
+  - forcing `0x1001a0e4 == 0` collapses the low six bits to the `0x3f` full-scale marker and leaves only the top-bit carry flags
+  - the DLL image itself actually initializes `0x1001a0e4` to `1`, so the real geometry path preserves the fractional low-six-bit weights whenever they are not the `0x40` full-scale case
+- The C# harness can now dump the original helper directly with:
+  - `Dj1000DllHarness.exe --dll PATH --output out.bin --dump-resample-lut WIDTH`
+- The native CLI can dump either LUT postpass mode with:
+  - `dj1000 dump-resample-lut WIDTH OUTPUT.bin`
+  - `dj1000 dump-resample-lut WIDTH OUTPUT.bin --preserve-full-scale-marker`
+- Native parity for this helper is currently confirmed against the original DLL for:
+  - `0x7c`
+  - `0x101`
+  - `0x103`
+  - `0x140`
+  - `0x1f8`
+  - `0x26c` in the real preserved-fraction mode used by the large geometry path
+
+## Newly decoded copy-out stage inside `0x100013c0`
+
+- The tail end of `0x100013c0` now has a native helper in [`geometry_copy.cpp`](../native/src/geometry_copy.cpp).
+- This is not the full row processor yet. It is the deterministic copy/crop stage after the per-row resampling work has populated the temporary planes.
+- Confirmed intermediate output shapes from the disassembly:
+  - preview path copies an `80 x 64` plane directly from the start of the temporary buffer
+  - normal path copies a `320 x 246` plane from a `324`-byte source stride with a `+2` byte left crop
+  - large path copies the top `504 x 378` region directly from the `504 x 384` temporary plane
+- These intermediate shapes explain why the geometry helper does not line up one-for-one with the final BMP sizes yet:
+  - preview helper output is taller than the final `80 x 60` preview
+  - normal helper output is taller than the final `320 x 240` export
+  - large helper output already matches the final large-height `378`
+- The copy-out logic is now unit-tested separately in:
+  - [`test_geometry_copy.cpp`](../native/tests/test_geometry_copy.cpp)
+- A new DLL-backed probe script now lives at [`probe_geometry_stage.py`](../tools/probe_geometry_stage.py).
+- A sparse impulse sweep driver now lives at [`sweep_geometry_impulses.py`](../tools/sweep_geometry_impulses.py).
+- Using synthetic patterned planes against the original DLL, it confirmed the actual active rewrite ranges:
+  - preview path rewrites bytes `0..5119`, exactly `80 x 64`
+  - normal path rewrites bytes `0..78719`, exactly `320 x 246`
+  - large path rewrites bytes `0..190511`, exactly `504 x 378`
+- The large-path probe is especially useful because it shows the geometry stage really does stop at the `504 x 378` boundary even when the in-place source buffers are larger.
+- Sparse impulse sweeps against the original DLL already show mode-specific behavior:
+  - the big new finding is that the geometry stage input appears to use a `512`-byte source stride, not `504` contiguous bytes per row
+  - that lines up directly with the disassembly in `0x10001920`, which repeatedly advances to the next source row with `+0x200`
+  - with that corrected source layout, normal mode (`320 x 246`) becomes much cleaner:
+    - source rows `0..245` survive; rows above that do not
+    - vertical mapping is identity in the tested cases
+    - horizontal mapping behaves like a `504 -> 320` resample with the known `+2` crop from the copy-out stage
+    - at source row `40`, the DLL maps columns like:
+      - `60 -> 40:36`
+      - `120 -> 40:74;40:75`
+      - `180 -> 40:113`
+      - `240 -> 40:151;40:152`
+      - `300 -> 40:190`
+      - `360 -> 40:229`
+      - `420 -> 40:267`
+      - `480 -> 40:306`
+  - with the same `512`-stride layout, large mode (`504 x 378`) also becomes much cleaner:
+    - horizontal mapping is identity in the tested cases
+    - source rows `0..243` survive; rows above that do not
+    - each single source sample turns into a 2-3 row vertical footprint
+    - example mappings for source column `60`:
+      - `0 -> 0:60;1:60`
+      - `40 -> 61:60;62:60;63:60`
+      - `80 -> 123:60;124:60;125:60`
+      - `120 -> 185:60;186:60;187:60`
+      - `160 -> 247:60;248:60;249:60`
+      - `200 -> 309:60;310:60;311:60`
+      - `240 -> 371:60;372:60;373:60`
+    - that strongly suggests a straightforward `244 -> 378` vertical expansion inside the large-path helper at `0x10001920`
+  - preview-mode synthetic impulses still need more study:
+    - with the current single-impulse setup and `512`-stride layout, only row-0 cases survive cleanly
+    - that likely means preview mode has an extra preconditioning rule rather than using the exact same simple path as normal mode
+
+## Newly lifted native non-large row helper: `0x10001000` in mode `0`
+
+- The middle of the non-large path is now clearer:
+  - `0x100016a0` is a per-plane wrapper that copies one source row into a scratch buffer
+  - `0x10001000` is the reusable row resampler that consumes that scratch row plus the packed LUT from `0x10001210`
+- The native row helper now lives in [`nonlarge_row_resample.cpp`](../native/src/nonlarge_row_resample.cpp) with its interface in [`nonlarge_row_resample.hpp`](../native/include/dj1000/nonlarge_row_resample.hpp).
+- Confirmed non-large `0x10001000` argument shape for the PhotoRun path:
+  - source scratch row pointer
+  - output scratch row pointer
+  - packed LUT pointer
+  - reset counter / large-mode override
+  - mode flag (`0` for the preview/normal branch we use here)
+  - width limit
+  - output length
+- In the real PhotoRun path, this helper runs with:
+  - `0x1001a0e0 == 1`
+  - a packed LUT generated with `0x1001a0e4 == 1`
+  - mode flag `0`
+- For the currently verified non-large cases, that means:
+  - normal branch row helper: LUT width `0x101`, width limit `0x1f9`, output length `0x144`
+  - preview branch row helper: LUT width `0x103`, width limit `0x7c`, output length `0x50`
+- The new direct DLL-backed parity check lives in [`verify_native_nonlarge_row_resample.py`](../tools/verify_native_nonlarge_row_resample.py).
+- The C# harness can now call the original row helper directly, so we no longer need to infer its behavior only through the full geometry stage.
+- Native verification is now available through:
+  - [`test_nonlarge_row_resample.cpp`](../native/tests/test_nonlarge_row_resample.cpp)
+  - [`verify_native_nonlarge_row_resample.py`](../tools/verify_native_nonlarge_row_resample.py)
+- This gives us a DLL-verified native replacement for the row-level non-large resampling logic, even though the full `0x100016a0` wrapper is not yet lifted end-to-end.
+
+## Newly lifted native non-large wrapper: `0x100016a0`
+
+- The `0x100016a0` wrapper around the non-large row helper is now reimplemented natively in:
+  - [`nonlarge_geometry.cpp`](../native/src/nonlarge_geometry.cpp)
+  - [`nonlarge_geometry.hpp`](../native/include/dj1000/nonlarge_geometry.hpp)
+- The verified wrapper behavior is:
+  - channel routing is identity: output channels `0`, `1`, and `2` read source planes `0`, `1`, and `2`
+  - normal mode reads `504` source bytes per row from offset `+1` with a `512`-byte row stride
+  - preview mode reads `126` source bytes per row from offset `+1` with a `128`-byte row stride
+  - normal mode resamples `244` rows into a `324 x 246` intermediate with the final two rows left zero-filled
+  - preview mode resamples `64` rows into an `80 x 64` intermediate
+- The wrapper now composes cleanly with the previously lifted native row helper and copy/crop stage, so the full non-large geometry stage can be exercised natively.
+- The full-stage DLL-backed parity check now lives at:
+  - [`verify_native_nonlarge_geometry.py`](../tools/verify_native_nonlarge_geometry.py)
+- Native verification is also covered by:
+  - [`test_nonlarge_geometry.cpp`](../native/tests/test_nonlarge_geometry.cpp)
+
+## Newly lifted native large-path helper: `0x10001920`
+
+- The large export branch in `0x100013c0` now decodes much more cleanly:
+  - non-large modes branch into `0x100016a0`
+  - export modes `5` and `6` branch directly into `0x10001920`
+- That helper is now reimplemented natively in [`large_vertical_resample.cpp`](../native/src/large_vertical_resample.cpp).
+- The native implementation currently targets the DLL's default mode, which is the mode exercised by the original PhotoRun large export path:
+  - active source width: `504`
+  - source stride: `512`
+  - active source rows: `244`
+  - output rows: `378`
+  - LUT width parameter: `0x26c` (`620`)
+- Two important `.data` defaults turned out to matter here:
+  - `0x1001a0e0 == 1`
+  - `0x1001a0e4 == 1`
+- That means the real large-path helper does use the preserved fractional low-six-bit LUT weights, not just the top-bit carry schedule.
+- The disassembly-backed structure of the helper is now much clearer:
+  - it keeps a two-row sliding window over the source plane
+  - it advances through the wide packed LUT from `0x10001210`
+  - the low six bits provide the cross-row blend weight used for the current output row
+  - the top bits provide the row-window carry / advance schedule that decides when the source-row window slides
+- Native verification is now available through:
+  - [`test_large_vertical_resample.cpp`](../native/tests/test_large_vertical_resample.cpp)
+  - [`verify_native_large_vertical.py`](../tools/verify_native_large_vertical.py)
+- The current DLL-backed parity check compares the native helper against the original large geometry path for:
+  - row-coded synthetic planes
+  - synthetic gradients
+  - sparse impulses
+- This is the first native piece of the large photo path that is verified against the original DLL on full plane data rather than only on isolated lookup tables.
+
+## Native macOS tooling added so far
+
+- [`tools/dj1000_dat_info.py`](../tools/dj1000_dat_info.py) inspects the raw container and trailer metadata.
+- [`tools/dj1000_pair_report.py`](../tools/dj1000_pair_report.py) summarizes matched `.dat` / `.bmp` / `.jpeg` reference sets.
+- [`tools/dj1000_index_view.py`](../tools/dj1000_index_view.py) is a direct reimplementation of `DsGraph.dll::TransToIndexView`, so the original preview/index byte reorder now runs natively on macOS.
+- [`tools/Dj1000DllHarness.cs`](../tools/Dj1000DllHarness.cs) is a tiny Windows-side bridge that calls the original `DJ1000GraphicConv` export.
+- [`tools/dj1000_convert_original.py`](../tools/dj1000_convert_original.py) runs that bridge under the local Wine bundle from macOS.
+- [`tools/verify_native_resample_lut.py`](../tools/verify_native_resample_lut.py) verifies the newly lifted native lookup helper against the original DLL.
+- [`tools/verify_native_large_vertical.py`](../tools/verify_native_large_vertical.py) verifies the newly lifted native large-path vertical helper against the original DLL-backed geometry stage.
+- [`tools/verify_native_nonlarge_row_resample.py`](../tools/verify_native_nonlarge_row_resample.py) verifies the newly lifted native non-large row helper against the original DLL row resampler.
+- [`tools/verify_native_nonlarge_geometry.py`](../tools/verify_native_nonlarge_geometry.py) verifies the newly lifted native non-large geometry wrapper against the original DLL-backed geometry stage.
+- [`tools/verify_native_pregeometry_normalize.py`](../tools/verify_native_pregeometry_normalize.py) verifies the newly lifted native `0x10001e00` float-plane normalization helper against the original DLL.
+- [`tools/probe_source_stage.py`](../tools/probe_source_stage.py) drives the original `0x10005eb0` raw source stage with synthetic byte rows so we can study the float-plane producer that feeds `0x10001e00`.
+- [`tools/probe_geometry_stage.py`](../tools/probe_geometry_stage.py) drives the original `0x100013c0` geometry stage with synthetic planes so we can measure and diff its in-place behavior directly.
+- [`tools/sweep_geometry_impulses.py`](../tools/sweep_geometry_impulses.py) runs sparse DLL-backed impulse sweeps so we can see how individual source samples move through the geometry stage.
+- [`tools/dj1000_verify_original.py`](../tools/dj1000_verify_original.py) verifies reference BMPs against the Wine-driven original converter.
+- [`tools/dj1000_search_settings.py`](../tools/dj1000_search_settings.py) brute-forces one EXE-side settings field against a reference BMP.
+
+## Native rewrite workspace
+
+- A new native C++ rewrite workspace now lives under [`native/`](../native).
+- It currently includes:
+  - exact `.DAT` parsing and trailer metadata extraction
+  - exact native `TransToIndexView` reproduction
+  - a native reimplementation of the geometry-stage resample-LUT helper at `0x10001210`
+  - a native reimplementation of the deterministic copy-out stage at the tail of `0x100013c0`
+  - a native CLI for `info`, `index-bmp`, and `dump-resample-lut`
+  - native unit tests that lock down the index-view byte reorder, the resample-LUT helper, and the geometry copy-out helper
+- The first generated fixture manifest for the local sample corpus is:
+  - [`reference_manifest.json`](../native/reference_manifest.json)
+- The native rewrite roadmap is documented here:
+  - [`native-rewrite-plan.md`](native-rewrite-plan.md)
+
+## Historical packaging note
+
+- There was an earlier local PyInstaller-based macOS app-bundle experiment built around the DLL/Wine workflow.
+- There were also earlier GUI and batch-wrapper experiments around the DLL/Wine workflow.
+- Those app-side files are no longer kept in this core repository, which is now focused on the native converter library, CLI, verification tooling, and documentation.
+
+## What the EXE really passes into the DLL
+
+- `DJ1000GraphicConv` is called with:
+  - arg 1: mode flag (`0` for export, `1` for preview)
+  - arg 2: a mutable image buffer
+  - arg 3: a 12-dword settings block
+- In one confirmed export path, `PhotoRun.exe` copies the full `0x20000`-byte `.dat` blob into arg 2 immediately before calling the DLL.
+- The 12-dword settings block is built as:
+  - `[0] = this+0xf4`
+  - `[1] = this+0xf8`
+  - `[2] = this+0xfc`
+  - `[3] = this+0x100`
+  - `[4] = this+0x104`
+  - `[5] = this+0x108`
+  - `[6] = this+0x10c`
+  - `[7] = this+0x120`
+  - `[8] = this+0x128`
+  - `[9] = this+0x12c`
+  - `[10] = this+0x130`
+  - `[11] = 1`
+- `this+0x120`, `this+0x128`, `this+0x12c`, and `this+0x130` are populated from file metadata / UI state.
+- Several of the earlier fields (`0x100`, `0x104`, `0x108`, `0x10c`) are edited through EXE-side dialog handlers, so matching untouched PhotoRun defaults matters.
+
+## Local Windows runtime status
+
+- A standalone Wine bundle was downloaded and extracted under `tmp_debug/wine-stable`.
+- The bundled CLI runtime works locally:
+  - `.../Contents/Resources/wine/bin/wine --version` reports `wine-11.0`
+- A Homebrew cask install was not necessary for experimentation, and the system-wide install attempt only failed because the `gstreamer-runtime` dependency wanted `sudo`.
+- Wine's bundled `powershell.exe` exists but is currently a stub in this build, so it is not useful for P/Invoke-based DLL automation.
+
+## Important current blocker
+
+- We now have sample `.dat` and original BMP outputs, so the remaining blocker is no longer file validation.
+- The hard part that remains is the float-heavy color/tone pipeline between the raw/intermediate planes and the final BMP.
+- The most reliable shortcut to exact matching would still be a runnable Windows environment for `DsGraph.dll`, so we can compare a native reimplementation against the legacy code while finishing the reverse engineering.
+
+## Recommended next step
+
+- Use the reference BMP set to validate each reconstructed helper stage incrementally.
+- If possible, run the original converter or the DLL itself under a modern compatibility layer so we can diff our work against the ground truth at every step.
+
+## Current fidelity status
+
+- The Wine-driven wrapper around the original `DsGraph.dll` is now producing byte-identical BMPs on macOS for untouched exports.
+- Confirmed exact matches include:
+  - `MDSC0001.DAT` -> `mdsc0001.bmp`
+  - `MDSC0008.DAT` -> `mdsc0008s.bmp`
+  - large-reference sweep: `mdsc0001.bmp`, `mdsc0004.bmp`, `mdsc0005.bmp`, `mdsc0007.bmp`, `mdsc0008.bmp`, `mdsc0009.bmp`, `mdsc0011.bmp`, `mdsc0015.bmp`, `mdsc0016.bmp`, `mdsc0017.bmp`
+- The two large-reference mismatches turned out not to be decoder failures:
+  - `mdsc0006.bmp` matches exactly when EXE-side `setting4` is overridden from the default `3` to `6`
+  - `mdsc0010.bmp` matches exactly when `setting4=6` and `setting5=6`
+- That lines up with the original user workflow: these files were exported after changing PhotoRun's image-adjustment slider state before saving.
+- A local batch manifest and GUI experiment previously reproduced all 14 known sample BMPs byte-for-byte through the original DLL, but those app-side files are no longer part of the core repository snapshot.
+
+## Practical usage
+
+- Default untouched large export:
+  - `python3 tools/dj1000_convert_original.py INPUT.DAT OUTPUT.bmp --size large`
+- Default untouched small export:
+  - `python3 tools/dj1000_convert_original.py INPUT.DAT OUTPUT.bmp --size small`
+- Current best control mapping for the EXE-side settings block:
+  - `setting1`: Red Balance
+  - `setting0`: Green Balance
+  - `setting2`: Blue Balance
+  - `setting3`: Contrast
+  - `setting4`: Brightness
+  - `setting5`: Vividness
+  - `setting6`: Sharpness
+- The color-balance order is now confirmed by behavior testing against the original DLL.
+- Reproduce the brightened `MDSC0006` export:
+  - `python3 tools/dj1000_convert_original.py MDSC0006.DAT out.bmp --size large --brightness 6`
+- Reproduce the adjusted `MDSC0010` export:
+  - `python3 tools/dj1000_convert_original.py MDSC0010.DAT out.bmp --size large --brightness 6 --vividness 6`
+- Apply named color-balance controls:
+  - `python3 tools/dj1000_convert_original.py INPUT.DAT out.bmp --size large --red-balance 120 --green-balance 90 --blue-balance 110`
+
+## Large export top-level trace milestone
+
+- The harness can now trace the real `DJ1000GraphicConv` large-export call path from inside the DLL and dump selected intermediate buffers:
+  - [`tools/Dj1000DllHarness.cs`](../tools/Dj1000DllHarness.cs)
+  - trace mode: `--trace-large-callsite-params`
+- New direct top-level findings from the untouched large path:
+  - the `0x10004570` source prepass is still not called for the `MDSC0001/0008/0009` default large cases
+  - the real large path does call `0x100021a0` between `0x10002410` and `0x10004810`
+  - `0x10003890` is called with `level=3`
+  - `0x10003060` is called with:
+    - `stageParam0=16`
+    - `stageParam1=40`
+    - `stageParam2=160`
+    - `stageParam3=10`
+    - `threshold=20`
+  - the raw `0x10004450` call-site scalar remains `1.5` for the traced max-gain cases and matches the already inferred `clamp(source_gain, 1.0, 1.5)` rule
+  - the raw `0x10003060` call-site slot that our current hook decodes as `scalar` carries `5.0` on `MDSC0001` / `MDSC0008` and `4.59` on `MDSC0009`
+- That `0x10003060` slot must not be blindly wired into the native large path yet:
+  - feeding it directly into the current native `0x10003060` reimplementation makes the final large BMP much worse
+  - this means the top-level large branch still differs from the standalone helper-chain reconstruction in upstream buffer state, argument interpretation, or both
+- After adding that missing `0x100021a0` filter stage to the native large pipeline, the corrected large trace now matches end to end for `MDSC0001.DAT`:
+  - geometry
+  - `0x10002410`
+  - `0x100021a0`
+  - `0x10004810`
+  - `0x10003600`
+  - `0x10002a00`
+  - `0x10002c40`
+  - `0x10002dd0`
+  - `0x10003890`
+  - `0x10003060`
+  - `0x10004450`
+  - `0x10002530`
+  - `0x100042a0`
+  - `0x10003b00`
+  - `0x100040f0`
+  - final `504 x 378` BMP
+- Large-path status after that fix:
+  - exact end-to-end large export now verified for `MDSC0001.DAT`
+  - direct large BMP sweep also matches for `MDSC0005.DAT`, `MDSC0008.DAT`, `MDSC0009.DAT`, `MDSC0011.DAT`, and `MDSC0016.DAT`
+  - the remaining large-reference mismatches are no longer in the broad large pipeline; they localize to `0x10004810`
+- Current localization of the remaining large-path drift:
+  - `MDSC0004.DAT` still matches through:
+    - geometry
+    - `0x10002410`
+    - `0x100021a0`
+  - the first failing stage is `0x10004810`
+  - for that real-data case, the mismatch is confined to `plane0` / `plane2`
+  - the current native residual is only `34` mismatching `double` samples per side plane
+  - those mismatches are clustered in the last four rows, which strongly points at incomplete real-data horizontal-repair behavior in `0x10004810`
+
+## Large export 4810 milestone
+
+- The real `0x10004810` behavior is now pinned down more cleanly:
+  - the horizontal repair pass uses only the first `height - 2` rows
+  - the vertical temp-buffer builder still copies the full source height
+  - the vertical repair pass uses the first `height - 1` rows
+- With that correction, the large trace for `MDSC0004.DAT` now matches through:
+  - `0x10004810`
+  - `0x10003600`
+  - `0x10002a00`
+  - `0x10002c40`
+  - `0x10002dd0`
+  - `0x10003890`
+  - `0x10003060`
+  - `0x10004450`
+  - RGB / post-RGB
+  - final `504 x 378` BMP
+- The native large default-export sweep is now exact for:
+  - `MDSC0001.DAT`
+  - `MDSC0004.DAT`
+  - `MDSC0005.DAT`
+  - `MDSC0007.DAT`
+  - `MDSC0008.DAT`
+  - `MDSC0009.DAT`
+  - `MDSC0011.DAT`
+  - `MDSC0016.DAT`
+- Two large-reference cases still remain outside that milestone:
+  - `MDSC0015.DAT`
+  - `MDSC0017.DAT`
+- Those two are not another `0x10004810` tail bug:
+  - the original native source-stage approximation was still wrong on low-gain real data
+  - the missing source-stage rule is now pinned down:
+    - the center/source ratio path fires when `abs(left - right) >= 2.0`
+    - the earlier native `> 2.0` test was enough for the bright cases, but it broke `MDSC0015.DAT` and `MDSC0017.DAT`
+  - with that correction, both low-gain large samples now match the DLL through:
+    - geometry
+    - `0x10002410`
+    - `0x100021a0`
+    - `0x10004810`
+    - `0x10003600`
+    - `0x10002a00`
+    - `0x10002c40`
+    - `0x10002dd0`
+    - `0x10003890`
+  - the top-level low-gain large-callsite values are now pinned down for both remaining misses:
+    - `MDSC0015.DAT`
+      - `source_gain = 1.24054054054054`
+      - `0x10003060 stageParam1 = 24`
+      - `0x10003060 threshold = 23`
+      - `0x10003060 scalar = 1.24054054054054`
+      - `0x10004450 scalar = 1.24054054054054`
+    - `MDSC0017.DAT`
+      - `source_gain = 1.02`
+      - `0x10003060 stageParam1 = 20`
+      - `0x10003060 threshold = 25`
+      - `0x10003060 scalar = 1.02`
+      - `0x10004450 scalar = 1.02`
+  - the remaining large-path gap is now isolated to the native `0x10003060` helper on those low-gain cases
+  - the current mismatch is no longer broad:
+    - `MDSC0015.DAT`: `60` samples, max diff `13.967195675675725`
+    - `MDSC0017.DAT`: `197` samples, max diff `28.06117389473684`
+
+## Native export status milestone
+
+- The native large path is now closed for the untouched reference corpus:
+  - `MDSC0001.DAT`, `MDSC0004.DAT`, `MDSC0005.DAT`, `MDSC0007.DAT`, `MDSC0008.DAT`, `MDSC0009.DAT`, `MDSC0011.DAT`, `MDSC0015.DAT`, `MDSC0016.DAT`, and `MDSC0017.DAT` all match their large reference BMPs exactly.
+- The remaining untouched small-reference gap turned out not to be the existing `normal-export-bmp` path:
+  - PhotoRun `size small` uses `export_mode = 0`, not `export_mode = 2`
+  - the real small top-level call path is still `320 x 244` through the late-stage working buffers, then `320 x 240` after the final crop
+  - the top-level small call-site values now pinned down are:
+    - `0x10003060 stageParam0 = 8`
+    - `0x10003060 stageParam1 = 40`
+    - `0x10003060 threshold = 20`
+    - `0x10003b00 scalar = 30`
+  - with those defaults, the native small path now matches:
+    - `MDSC0008.DAT` -> `mdsc0008s.bmp`
+    - `MDSC0009.DAT` -> `mdsc0009s.bmp`
+- Native end-to-end default export status against the full local BMP corpus is now:
+  - exact: `12 / 14`
+  - the only remaining reference mismatches are still the known edited exports:
+    - `mdsc0006.bmp` requires brightness override
+    - `mdsc0010.bmp` requires brightness and vividness overrides
+- The native slider-controlled large-export path is now closed for the known edited local references too:
+  - `MDSC0006.DAT` with brightness `6` matches `mdsc0006.bmp` exactly
+  - `MDSC0010.DAT` with brightness `6` and vividness `6` matches `mdsc0010.bmp` exactly
+- The isolated `0x10003890` vividness helper needed one more DLL-faithful arithmetic detail before those edited exports closed cleanly:
+  - `plane1` is effectively evaluated as `((plane0 * ratio) + plane1) * scale`
+  - the intermediate multiply/add must round before the final scale step
+  - the earlier compensated helper was numerically close, but it still drifted by a few ulps on real vividness data and could move a final BMP byte
+- The large-path trace tool at [`tools/trace_default_large_export_sample.py`](../tools/trace_default_large_export_sample.py) now accepts slider overrides for:
+  - color balance
+  - contrast
+  - brightness
+  - vividness
+  - sharpness
+  - that makes it possible to compare edited native exports against a fresh traced DLL path stage by stage, not just the untouched defaults
+- A reusable corpus verifier now checks the full local reference set end to end through the native exporter:
+  - [`tools/verify_native_reference_corpus.py`](../tools/verify_native_reference_corpus.py)
+  - current status: `14 / 14` local reference BMPs exact
